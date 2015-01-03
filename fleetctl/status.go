@@ -1,8 +1,26 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package main
 
 import (
 	"fmt"
-	"os"
+
+	"github.com/coreos/fleet/job"
+	"github.com/coreos/fleet/schema"
 )
 
 var cmdStatusUnits = &Command{
@@ -17,40 +35,55 @@ Show status of a single unit:
 	fleetctl status foo.service
 
 Show status of an entire directory with glob matching:
-fleetctl status myservice/*`,
+fleetctl status myservice/*
+
+This command does not work with global units.`,
 	Run: runStatusUnits,
 }
 
 func runStatusUnits(args []string) (exit int) {
-	for i, v := range args {
-		// This extra newline here to match systemctl status output
+	units, err := cAPI.Units()
+	if err != nil {
+		stderr("Error retrieving unit: %v", err)
+		return 1
+	}
+
+	uMap := make(map[string]*schema.Unit, len(args))
+	for _, u := range units {
+		if u != nil {
+			u := u
+			uMap[u.Name] = u
+		}
+	}
+
+	names := make([]string, len(args))
+	for i, arg := range args {
+		name := unitNameMangle(arg)
+		names[i] = name
+
+		u, ok := uMap[name]
+		if !ok {
+			stderr("Unit %s does not exist.", name)
+			return 1
+		} else if suToGlobal(*u) {
+			stderr("Unable to determine status of global unit %s.", name)
+			return 1
+		} else if job.JobState(u.CurrentState) == job.JobStateInactive {
+			stderr("Unit %s does not appear to be loaded.", name)
+			return 1
+		}
+	}
+
+	for i, name := range names {
+		// This extra newline is here to match systemctl status output
 		if i != 0 {
 			fmt.Printf("\n")
 		}
 
-		name := unitNameMangle(v)
-		exit = printUnitStatus(name)
-		if exit != 0 {
+		cmd := fmt.Sprintf("systemctl status -l %s", name)
+		if exit := runCommand(cmd, uMap[name].MachineID); exit != 0 {
 			break
 		}
 	}
 	return
-}
-
-func printUnitStatus(jobName string) int {
-	j, err := cAPI.Job(jobName)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error retrieving Job %s: %v", jobName, err)
-		return 1
-	}
-	if j == nil {
-		fmt.Fprintf(os.Stderr, "Job %s does not exist.\n", jobName)
-		return 1
-	} else if j.UnitState == nil {
-		fmt.Fprintf(os.Stderr, "Job %s does not appear to be running.\n", jobName)
-		return 1
-	}
-
-	cmd := fmt.Sprintf("systemctl status -l %s", jobName)
-	return runCommand(cmd, j.UnitState.MachineID)
 }

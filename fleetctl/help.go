@@ -1,3 +1,19 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package main
 
 import (
@@ -7,6 +23,11 @@ import (
 	"text/template"
 
 	"github.com/coreos/fleet/version"
+)
+
+const (
+	// used to indicate flag usage should not be printed
+	hidden = "hidden"
 )
 
 var (
@@ -26,11 +47,14 @@ var (
 			return strings.Split(strings.Trim(s, "\n\t "), "\n")
 		},
 		"printOption": func(name, defvalue, usage string) string {
+			if usage == hidden {
+				return ""
+			}
 			prefix := "--"
 			if len(name) == 1 {
 				prefix = "-"
 			}
-			return fmt.Sprintf("\t%s%s=%s\t%s", prefix, name, defvalue, usage)
+			return fmt.Sprintf("\n\t%s%s=%s\t%s", prefix, name, defvalue, usage)
 		},
 	}
 )
@@ -49,8 +73,7 @@ VERSION:
 COMMANDS:{{range .Commands}}
 {{printf "\t%s\t%s" .Name .Summary}}{{end}}
 
-GLOBAL OPTIONS:{{range .Flags}}
-{{printOption .Name .DefValue .Usage}}{{end}}
+GLOBAL OPTIONS:{{range .Flags}}{{printOption .Name .DefValue .Usage}}{{end}}
 
 Global options can also be configured via upper-case environment variables prefixed with "FLEETCTL_"
 For example, "some-flag" => "FLEETCTL_SOME_FLAG"
@@ -90,7 +113,7 @@ func runHelp(args []string) (exit int) {
 	}
 
 	if cmd == nil {
-		fmt.Println("Unrecognized command:", args[0])
+		stderr("Unrecognized command: %s", args[0])
 		return 1
 	}
 

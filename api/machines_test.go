@@ -1,3 +1,19 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package api
 
 import (
@@ -7,6 +23,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/coreos/fleet/client"
 	"github.com/coreos/fleet/machine"
 	"github.com/coreos/fleet/registry"
 )
@@ -17,7 +34,8 @@ func TestMachinesList(t *testing.T) {
 		{ID: "XXX", PublicIP: "", Metadata: nil},
 		{ID: "YYY", PublicIP: "1.2.3.4", Metadata: map[string]string{"ping": "pong"}},
 	})
-	resource := &machinesResource{fr}
+	fAPI := &client.RegistryClient{Registry: fr}
+	resource := &machinesResource{cAPI: fAPI}
 	rw := httptest.NewRecorder()
 	req, err := http.NewRequest("GET", "http://example.com", nil)
 	if err != nil {
@@ -49,7 +67,8 @@ func TestMachinesList(t *testing.T) {
 
 func TestMachinesListBadNextPageToken(t *testing.T) {
 	fr := registry.NewFakeRegistry()
-	resource := &machinesResource{fr}
+	fAPI := &client.RegistryClient{Registry: fr}
+	resource := &machinesResource{fAPI}
 	rw := httptest.NewRecorder()
 	req, err := http.NewRequest("GET", "http://example.com/machines?nextPageToken=EwBMLg==", nil)
 	if err != nil {
@@ -90,12 +109,12 @@ func TestExtractMachinePage(t *testing.T) {
 
 		first := page.Machines[0].Id
 		if first != strconv.FormatInt(int64(tt.idxStart), 10) {
-			t.Errorf("case %d: first element in page should have ID %d, got %d", i, tt.idxStart, first)
+			t.Errorf("case %d: first element in page should have ID %d, got %s", i, tt.idxStart, first)
 		}
 
 		last := page.Machines[len(page.Machines)-1].Id
 		if last != strconv.FormatInt(int64(tt.idxEnd), 10) {
-			t.Errorf("case %d: first element in page should have ID %d, got %d", i, tt.idxEnd, last)
+			t.Errorf("case %d: first element in page should have ID %d, got %s", i, tt.idxEnd, last)
 		}
 
 		if tt.next == nil && page.NextPageToken != "" {

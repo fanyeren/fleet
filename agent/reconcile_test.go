@@ -1,16 +1,34 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package agent
 
 import (
-	"fmt"
 	"reflect"
 	"testing"
 
 	"github.com/coreos/fleet/job"
 	"github.com/coreos/fleet/machine"
-	"github.com/coreos/fleet/pkg"
 	"github.com/coreos/fleet/registry"
 	"github.com/coreos/fleet/unit"
 )
+
+// Represents the hash of e.g. an empty unit
+// echo -n "" | sha1sum
+const emptyStringHash = "da39a3ee5e6b4b0d3255bfef95601890afd80709"
 
 var (
 	jsInactive = job.JobStateInactive
@@ -18,148 +36,362 @@ var (
 	jsLaunched = job.JobStateLaunched
 )
 
-func fleetUnit(t *testing.T, opts ...string) unit.Unit {
-	contents := "[X-Fleet]"
-	for _, v := range opts {
-		contents = fmt.Sprintf("%s\n%s", contents, v)
+func makeAgentWithMetadata(md map[string]string) *Agent {
+	return &Agent{
+		Machine: &machine.FakeMachine{
+			MachineState: machine.MachineState{
+				ID:       "this_machine",
+				Metadata: md,
+			},
+		},
+	}
+}
+
+func newUF(t *testing.T, contents string) unit.UnitFile {
+	uf, err := unit.NewUnitFile(contents)
+	if err != nil {
+		t.Fatalf("error creating new unit file from %v: %v", contents, err)
+	}
+	return *uf
+}
+
+func TestDesiredAgentState(t *testing.T) {
+	testCases := []struct {
+		metadata map[string]string
+		regJobs  []job.Job
+		asUnits  map[string]*job.Unit
+	}{
+		// No units in the registry = nothing to do
+		{
+			nil,
+			nil,
+			map[string]*job.Unit{},
+		},
+		// Single Unit scheduled to this machine. Easy.
+		{
+			nil,
+			[]job.Job{
+				job.Job{
+					Name:            "foo.service",
+					Unit:            newUF(t, "blah"),
+					TargetMachineID: "this_machine",
+				},
+			},
+			map[string]*job.Unit{
+				"foo.service": &job.Unit{
+					Name: "foo.service",
+					Unit: newUF(t, "blah"),
+				},
+			},
+		},
+		// Unit scheduled nowhere - ignore it
+		{
+			nil,
+			[]job.Job{
+				job.Job{
+					Name: "foo.service",
+					Unit: newUF(t, "blah"),
+				},
+			},
+			map[string]*job.Unit{},
+		},
+		// Unit scheduled somewhere else - ignore it
+		{
+			nil,
+			[]job.Job{
+				job.Job{
+					Name:            "foo.service",
+					Unit:            newUF(t, "blah"),
+					TargetMachineID: "elsewhere",
+				},
+			},
+			map[string]*job.Unit{},
+		},
+		// Global Unit with no metadata? No problem
+		{
+			nil,
+			[]job.Job{
+				job.Job{
+					Name: "global.service",
+					Unit: newUF(t, "[X-Fleet]\nGlobal=true"),
+				},
+			},
+			map[string]*job.Unit{
+				"global.service": &job.Unit{
+					Name: "global.service",
+					Unit: newUF(t, "[X-Fleet]\nGlobal=true"),
+				},
+			},
+		},
+		// Global Unit with metadata we have? Great
+		{
+			map[string]string{"dog": "woof"},
+			[]job.Job{
+				job.Job{
+					Name: "global.mount",
+					Unit: newUF(t, `
+[X-Fleet]
+Global=true
+MachineMetadata=dog=woof`),
+				},
+			},
+			map[string]*job.Unit{
+				"global.mount": &job.Unit{
+					Name: "global.mount",
+					Unit: newUF(t, `
+[X-Fleet]
+Global=true
+MachineMetadata=dog=woof`),
+				},
+			},
+		},
+		// Global Unit with metadata we don't? Uhoh
+		{
+			nil,
+			[]job.Job{
+				job.Job{
+					Name: "global.mount",
+					Unit: newUF(t, `
+[X-Fleet]
+Global=true
+MachineMetadata=dog=woof`),
+				},
+			},
+			map[string]*job.Unit{},
+		},
+		{
+			map[string]string{"cat": "miaow"},
+			[]job.Job{
+				job.Job{
+					Name: "global.mount",
+					Unit: newUF(t, `
+[X-Fleet]
+Global=true
+MachineMetadata=dog=woof`),
+				},
+			},
+			map[string]*job.Unit{},
+		},
+		// Mix it up a bit!
+		{
+			nil,
+			[]job.Job{
+				job.Job{
+					Name:            "foo.service",
+					Unit:            newUF(t, "blah"),
+					TargetMachineID: "this_machine",
+				},
+				job.Job{
+					Name: "bar.service",
+					Unit: newUF(t, "blah"),
+				},
+				job.Job{
+					Name: "global.service",
+					Unit: newUF(t, "[X-Fleet]\nGlobal=true"),
+				},
+				job.Job{
+					Name: "global.mount",
+					Unit: newUF(t, `
+[X-Fleet]
+Global=true
+MachineMetadata=dog=woof`),
+				},
+			},
+			map[string]*job.Unit{
+				"foo.service": &job.Unit{
+					Name: "foo.service",
+					Unit: newUF(t, "blah"),
+				},
+				"global.service": &job.Unit{
+					Name: "global.service",
+					Unit: newUF(t, "[X-Fleet]\nGlobal=true"),
+				},
+			},
+		},
+		{
+			map[string]string{"dog": "woof"},
+			[]job.Job{
+				job.Job{
+					Name:            "foo.service",
+					Unit:            newUF(t, "blah"),
+					TargetMachineID: "this_machine",
+				},
+				job.Job{
+					Name: "bar.service",
+					Unit: newUF(t, "blah"),
+				},
+				job.Job{
+					Name: "global.service",
+					Unit: newUF(t, "[X-Fleet]\nGlobal=true"),
+				},
+				job.Job{
+					Name: "global.mount",
+					Unit: newUF(t, `
+[X-Fleet]
+Global=true
+MachineMetadata=dog=woof`),
+				},
+			},
+			map[string]*job.Unit{
+				"foo.service": &job.Unit{
+					Name: "foo.service",
+					Unit: newUF(t, "blah"),
+				},
+				"global.service": &job.Unit{
+					Name: "global.service",
+					Unit: newUF(t, "[X-Fleet]\nGlobal=true"),
+				},
+				"global.mount": &job.Unit{
+					Name: "global.mount",
+					Unit: newUF(t, `
+[X-Fleet]
+Global=true
+MachineMetadata=dog=woof`),
+				},
+			},
+		},
 	}
 
-	u, err := unit.NewUnit(contents)
-	if u == nil || err != nil {
-		t.Fatalf("Failed creating test unit: unit=%v, err=%v", u, err)
+	for i, tt := range testCases {
+		reg := registry.NewFakeRegistry()
+		reg.SetJobs(tt.regJobs)
+		a := makeAgentWithMetadata(tt.metadata)
+		as, err := desiredAgentState(a, reg)
+		if err != nil {
+			t.Errorf("case %d: unexpected error: %v", i, err)
+		} else if !reflect.DeepEqual(as.Units, tt.asUnits) {
+			t.Errorf("case %d: AgentState differs to expected", i)
+			t.Logf("found:\n")
+			for _, u := range as.Units {
+				t.Logf("  %#v", u)
+			}
+			t.Logf("expected:\n")
+			for _, u := range tt.asUnits {
+				t.Logf("  %#v", u)
+			}
+		}
 	}
-
-	return *u
 }
 
 func TestAbleToRun(t *testing.T) {
 	tests := []struct {
-		dState *agentState
-		mState *machine.MachineState
+		dState *AgentState
 		job    *job.Job
 		want   bool
 	}{
 		// nothing to worry about
 		{
-			dState: newAgentState(),
-			mState: &machine.MachineState{ID: "123"},
-			job:    &job.Job{Name: "easy-street.service", Unit: unit.Unit{}},
+			dState: NewAgentState(&machine.MachineState{ID: "123"}),
+			job:    &job.Job{Name: "easy-street.service", Unit: unit.UnitFile{}},
 			want:   true,
 		},
 
-		// match X-ConditionMachineID
+		// match MachineID
 		{
-			dState: newAgentState(),
-			mState: &machine.MachineState{ID: "XYZ"},
-			job:    newTestJobWithXFleetValues(t, "X-ConditionMachineID=XYZ"),
+			dState: NewAgentState(&machine.MachineState{ID: "XYZ"}),
+			job:    newTestJobWithXFleetValues(t, "MachineID=XYZ"),
 			want:   true,
 		},
 
-		// mismatch X-ConditionMachineID
+		// mismatch MachineID
 		{
-			dState: newAgentState(),
-			mState: &machine.MachineState{ID: "123"},
-			job:    newTestJobWithXFleetValues(t, "X-ConditionMachineID=XYZ"),
+			dState: NewAgentState(&machine.MachineState{ID: "123"}),
+			job:    newTestJobWithXFleetValues(t, "MachineID=XYZ"),
 			want:   false,
 		},
 
-		// match X-ConditionMachineMetadata
+		// match MachineMetadata
 		{
-			dState: newAgentState(),
-			mState: &machine.MachineState{ID: "123", Metadata: map[string]string{"region": "us-west"}},
-			job:    newTestJobWithXFleetValues(t, "X-ConditionMachineMetadata=region=us-west"),
+			dState: NewAgentState(&machine.MachineState{ID: "123", Metadata: map[string]string{"region": "us-west"}}),
+			job:    newTestJobWithXFleetValues(t, "MachineMetadata=region=us-west"),
 			want:   true,
 		},
 
-		// Machine metadata ignored when no X-ConditionMachineMetadata in Job
+		// Machine metadata ignored when no MachineMetadata in Job
 		{
-			dState: newAgentState(),
-			mState: &machine.MachineState{ID: "123", Metadata: map[string]string{"region": "us-west"}},
-			job:    &job.Job{Name: "easy-street.service", Unit: unit.Unit{}},
+			dState: NewAgentState(&machine.MachineState{ID: "123", Metadata: map[string]string{"region": "us-west"}}),
+			job:    &job.Job{Name: "easy-street.service", Unit: unit.UnitFile{}},
 			want:   true,
 		},
 
-		// mismatch X-ConditionMachineMetadata
+		// mismatch MachineMetadata
 		{
-			dState: newAgentState(),
-			mState: &machine.MachineState{ID: "123", Metadata: map[string]string{"region": "us-west"}},
-			job:    newTestJobWithXFleetValues(t, "X-ConditionMachineMetadata=region=us-east"),
+			dState: NewAgentState(&machine.MachineState{ID: "123", Metadata: map[string]string{"region": "us-west"}}),
+			job:    newTestJobWithXFleetValues(t, "MachineMetadata=region=us-east"),
 			want:   false,
 		},
 
 		// peer scheduled locally
 		{
-			dState: &agentState{
-				jobs: map[string]*job.Job{
-					"pong.service": &job.Job{Name: "pong.service"},
+			dState: &AgentState{
+				MState: &machine.MachineState{ID: "123"},
+				Units: map[string]*job.Unit{
+					"pong.service": &job.Unit{Name: "pong.service"},
 				},
 			},
-			mState: &machine.MachineState{ID: "123"},
-			job:    newTestJobWithXFleetValues(t, "X-ConditionMachineOf=pong.service"),
-			want:   true,
+			job:  newTestJobWithXFleetValues(t, "MachineOf=pong.service"),
+			want: true,
 		},
 
 		// multiple peers scheduled locally
 		{
-			dState: &agentState{
-				jobs: map[string]*job.Job{
-					"ping.service": &job.Job{Name: "ping.service"},
-					"pong.service": &job.Job{Name: "pong.service"},
+			dState: &AgentState{
+				MState: &machine.MachineState{ID: "123"},
+				Units: map[string]*job.Unit{
+					"ping.service": &job.Unit{Name: "ping.service"},
+					"pong.service": &job.Unit{Name: "pong.service"},
 				},
 			},
-			mState: &machine.MachineState{ID: "123"},
-			job:    newTestJobWithXFleetValues(t, "X-ConditionMachineOf=pong.service\nX-ConditionMachineOf=ping.service"),
-			want:   true,
+			job:  newTestJobWithXFleetValues(t, "MachineOf=pong.service\nMachineOf=ping.service"),
+			want: true,
 		},
 
 		// peer not scheduled locally
 		{
-			dState: newAgentState(),
-			mState: &machine.MachineState{ID: "123"},
-			job:    newTestJobWithXFleetValues(t, "X-ConditionMachineOf=ping.service"),
+			dState: NewAgentState(&machine.MachineState{ID: "123"}),
+			job:    newTestJobWithXFleetValues(t, "MachineOf=ping.service"),
 			want:   false,
 		},
 
 		// one of multiple peers not scheduled locally
 		{
-			dState: &agentState{
-				jobs: map[string]*job.Job{
-					"ping.service": &job.Job{Name: "ping.service"},
+			dState: &AgentState{
+				MState: &machine.MachineState{ID: "123"},
+				Units: map[string]*job.Unit{
+					"ping.service": &job.Unit{Name: "ping.service"},
 				},
 			},
-			mState: &machine.MachineState{ID: "123"},
-			job:    newTestJobWithXFleetValues(t, "X-ConditionMachineOf=pong.service\nX-ConditionMachineOf=ping.service"),
-			want:   false,
+			job:  newTestJobWithXFleetValues(t, "MachineOf=pong.service\nMachineOf=ping.service"),
+			want: false,
 		},
 
 		// no conflicts found
 		{
-			dState: &agentState{
-				jobs: map[string]*job.Job{
-					"ping.service": &job.Job{Name: "ping.service"},
+			dState: &AgentState{
+				MState: &machine.MachineState{ID: "123"},
+				Units: map[string]*job.Unit{
+					"ping.service": &job.Unit{Name: "ping.service"},
 				},
 			},
-			mState: &machine.MachineState{ID: "123"},
-			job:    newTestJobWithXFleetValues(t, "X-Conflicts=pong.service"),
-			want:   true,
+			job:  newTestJobWithXFleetValues(t, "Conflicts=pong.service"),
+			want: true,
 		},
 
 		// conflicts found
 		{
-			dState: &agentState{
-				jobs: map[string]*job.Job{
-					"ping.service": &job.Job{Name: "ping.service"},
+			dState: &AgentState{
+				MState: &machine.MachineState{ID: "123"},
+				Units: map[string]*job.Unit{
+					"ping.service": &job.Unit{Name: "ping.service"},
 				},
 			},
-			mState: &machine.MachineState{ID: "123"},
-			job:    newTestJobWithXFleetValues(t, "X-Conflicts=ping.service"),
-			want:   false,
+			job:  newTestJobWithXFleetValues(t, "Conflicts=ping.service"),
+			want: false,
 		},
 	}
 
 	for i, tt := range tests {
-		ar := NewReconciler(registry.NewFakeRegistry(), nil)
-		got, _ := ar.ableToRun(tt.dState, tt.mState, tt.job)
+		got, _ := tt.dState.AbleToRun(tt.job)
 		if got != tt.want {
 			t.Errorf("case %d: expected %t, got %t", i, tt.want, got)
 		}
@@ -168,196 +400,308 @@ func TestAbleToRun(t *testing.T) {
 
 func TestCalculateTasksForJob(t *testing.T) {
 	tests := []struct {
-		mState *machine.MachineState
-		dState *agentState
-		cState *agentState
-		jName  string
+		dState *AgentState
+		cState unitStates
+		uName  string
 
-		tasks []task
+		chain *taskChain
 	}{
 
 		// nil agent state objects should result in no tasks
 		{
-			mState: &machine.MachineState{ID: "XXX"},
 			dState: nil,
 			cState: nil,
-			jName:  "foo.service",
-			tasks:  []task{},
+			uName:  "foo.service",
+			chain:  nil,
 		},
 
 		// nil job should result in no tasks
 		{
-			mState: &machine.MachineState{ID: "XXX"},
-			dState: newAgentState(),
-			cState: newAgentState(),
-			jName:  "foo.service",
-			tasks:  []task{},
+			dState: NewAgentState(&machine.MachineState{ID: "XXX"}),
+			cState: unitStates{},
+			uName:  "foo.service",
+			chain:  nil,
 		},
 
-		// no work needs to be done when target state == desired state
+		// no work needs to be done when current state == desired state
 		{
-			mState: &machine.MachineState{ID: "XXX"},
-			dState: &agentState{
-				jobs: map[string]*job.Job{
-					"foo.service": &job.Job{TargetState: jsLoaded},
+			dState: &AgentState{
+				MState: &machine.MachineState{ID: "XXX"},
+				Units: map[string]*job.Unit{
+					"foo.service": &job.Unit{TargetState: jsLoaded},
 				},
 			},
-			cState: &agentState{
-				jobs: map[string]*job.Job{
-					"foo.service": &job.Job{State: &jsLoaded},
+			cState: unitStates{
+				"foo.service": unitState{
+					state: jsLoaded,
+					hash:  emptyStringHash,
 				},
 			},
-			jName: "foo.service",
-			tasks: []task{},
+			uName: "foo.service",
+			chain: nil,
 		},
 
-		// no work needs to be done when target state == desired state
+		// no work needs to be done when current state == desired state
 		{
-			mState: &machine.MachineState{ID: "XXX"},
-			dState: &agentState{
-				jobs: map[string]*job.Job{
-					"foo.service": &job.Job{TargetState: jsLaunched},
+			dState: &AgentState{
+				MState: &machine.MachineState{ID: "XXX"},
+				Units: map[string]*job.Unit{
+					"foo.service": &job.Unit{TargetState: jsLaunched},
 				},
 			},
-			cState: &agentState{
-				jobs: map[string]*job.Job{
-					"foo.service": &job.Job{State: &jsLaunched},
+			cState: unitStates{
+				"foo.service": unitState{
+					state: jsLaunched,
+					hash:  emptyStringHash,
 				},
 			},
-			jName: "foo.service",
-			tasks: []task{},
+			uName: "foo.service",
+			chain: nil,
+		},
+
+		// when current state == desired state but hash differs, unit should be unloaded and then reloaded
+		{
+			dState: &AgentState{
+				MState: &machine.MachineState{ID: "XXX"},
+				Units: map[string]*job.Unit{
+					"foo.service": &job.Unit{TargetState: jsLaunched},
+				},
+			},
+			cState: unitStates{
+				"foo.service": unitState{
+					state: jsLaunched,
+					hash:  "abcdefg",
+				},
+			},
+			uName: "foo.service",
+			chain: &taskChain{
+				unit: &job.Unit{
+					Name: "foo.service",
+					Unit: unit.UnitFile{},
+				},
+				tasks: []task{
+					task{
+						typ:    taskTypeUnloadUnit,
+						reason: taskReasonLoadedButHashDiffers,
+					},
+					task{
+						typ:    taskTypeLoadUnit,
+						reason: taskReasonScheduledButUnloaded,
+					},
+					task{
+						typ:    taskTypeStartUnit,
+						reason: taskReasonLoadedDesiredStateLaunched,
+					},
+				},
+			},
+		},
+
+		// when current state != desired state and hash differs, unit should be unloaded and then reloaded
+		{
+			dState: &AgentState{
+				MState: &machine.MachineState{ID: "XXX"},
+				Units: map[string]*job.Unit{
+					"foo.service": &job.Unit{TargetState: jsLoaded},
+				},
+			},
+			cState: unitStates{
+				"foo.service": unitState{
+					state: jsLaunched,
+					hash:  "abcdefg",
+				},
+			},
+			uName: "foo.service",
+			chain: &taskChain{
+				unit: &job.Unit{
+					Name: "foo.service",
+					Unit: unit.UnitFile{},
+				},
+				tasks: []task{
+					task{
+						typ:    taskTypeUnloadUnit,
+						reason: taskReasonLoadedButHashDiffers,
+					},
+					task{
+						typ:    taskTypeLoadUnit,
+						reason: taskReasonScheduledButUnloaded,
+					},
+				},
+			},
+		},
+
+		// when current state != desired state and hash differs, unit should be unloaded and then reloaded
+		{
+			dState: &AgentState{
+				MState: &machine.MachineState{ID: "XXX"},
+				Units: map[string]*job.Unit{
+					"foo.service": &job.Unit{TargetState: jsLaunched},
+				},
+			},
+			cState: unitStates{
+				"foo.service": unitState{
+					state: jsLoaded,
+					hash:  "abcdefg",
+				},
+			},
+			uName: "foo.service",
+			chain: &taskChain{
+				unit: &job.Unit{
+					Name: "foo.service",
+					Unit: unit.UnitFile{},
+				},
+				tasks: []task{
+					task{
+						typ:    taskTypeUnloadUnit,
+						reason: taskReasonLoadedButHashDiffers,
+					},
+					task{
+						typ:    taskTypeLoadUnit,
+						reason: taskReasonScheduledButUnloaded,
+					},
+					task{
+						typ:    taskTypeStartUnit,
+						reason: taskReasonLoadedDesiredStateLaunched,
+					},
+				},
+			},
+		},
+
+		// no work needs to be done when desired state == inactive and current state == nil
+		{
+			dState: &AgentState{
+				MState: &machine.MachineState{ID: "XXX"},
+				Units: map[string]*job.Unit{
+					"foo.service": &job.Unit{TargetState: jsInactive},
+				},
+			},
+			cState: unitStates{},
+			uName:  "foo.service",
+			chain:  nil,
 		},
 
 		// load jobs that have a loaded desired state
 		{
-			mState: &machine.MachineState{ID: "XXX"},
-			dState: &agentState{
-				jobs: map[string]*job.Job{
-					"foo.service": &job.Job{TargetState: jsLoaded},
+			dState: &AgentState{
+				MState: &machine.MachineState{ID: "XXX"},
+				Units: map[string]*job.Unit{
+					"foo.service": &job.Unit{TargetState: jsLoaded},
 				},
 			},
-			cState: newAgentState(),
-			jName:  "foo.service",
-			tasks: []task{
-				task{
-					Type:   taskTypeLoadJob,
-					Job:    &job.Job{TargetState: jsLoaded},
-					Reason: taskReasonScheduledButUnloaded,
+			cState: unitStates{},
+			uName:  "foo.service",
+			chain: &taskChain{
+				unit: &job.Unit{
+					Name: "foo.service",
+					Unit: unit.UnitFile{},
 				},
-			},
-		},
-
-		// load jobs that have a launched desired state
-		{
-			mState: &machine.MachineState{ID: "XXX"},
-			dState: &agentState{
-				jobs: map[string]*job.Job{
-					"foo.service": &job.Job{TargetState: jsLaunched},
-				},
-			},
-			cState: newAgentState(),
-			jName:  "foo.service",
-			tasks: []task{
-				task{
-					Type:   taskTypeLoadJob,
-					Job:    &job.Job{TargetState: jsLaunched},
-					Reason: taskReasonScheduledButUnloaded,
+				tasks: []task{
+					task{
+						typ:    taskTypeLoadUnit,
+						reason: taskReasonScheduledButUnloaded,
+					},
 				},
 			},
 		},
 
-		// unload jobs that are no longer scheduled locally
+		// load + launch jobs that have a launched desired state
 		{
-			mState: &machine.MachineState{ID: "XXX"},
-			dState: newAgentState(),
-			cState: &agentState{
-				jobs: map[string]*job.Job{
-					"foo.service": &job.Job{State: &jsLoaded},
+			dState: &AgentState{
+				MState: &machine.MachineState{ID: "XXX"},
+				Units: map[string]*job.Unit{
+					"foo.service": &job.Unit{TargetState: jsLaunched},
 				},
 			},
-			jName: "foo.service",
-			tasks: []task{
-				task{
-					Type:   taskTypeUnloadJob,
-					Job:    &job.Job{State: &jsLoaded},
-					Reason: taskReasonLoadedButNotScheduled,
+			cState: unitStates{},
+			uName:  "foo.service",
+			chain: &taskChain{
+				unit: &job.Unit{
+					Name: "foo.service",
+				},
+				tasks: []task{
+					task{
+						typ:    taskTypeLoadUnit,
+						reason: taskReasonScheduledButUnloaded,
+					},
+					task{
+						typ:    taskTypeStartUnit,
+						reason: taskReasonLoadedDesiredStateLaunched,
+					},
 				},
 			},
 		},
 
 		// unload jobs that are no longer scheduled locally
 		{
-			mState: &machine.MachineState{ID: "XXX"},
-			dState: newAgentState(),
-			cState: &agentState{
-				jobs: map[string]*job.Job{
-					"foo.service": &job.Job{State: &jsLaunched},
+			dState: NewAgentState(&machine.MachineState{ID: "XXX"}),
+			cState: unitStates{
+				"foo.service": unitState{
+					state: jsLoaded,
+					hash:  emptyStringHash,
 				},
 			},
-			jName: "foo.service",
-			tasks: []task{
-				task{
-					Type:   taskTypeUnloadJob,
-					Job:    &job.Job{State: &jsLaunched},
-					Reason: taskReasonLoadedButNotScheduled,
+			uName: "foo.service",
+			chain: &taskChain{
+				unit: &job.Unit{
+					Name: "foo.service",
+				},
+				tasks: []task{
+					task{
+						typ:    taskTypeUnloadUnit,
+						reason: taskReasonLoadedButNotScheduled,
+					},
+				},
+			},
+		},
+
+		// unload jobs that are no longer scheduled locally
+		{
+			dState: NewAgentState(&machine.MachineState{ID: "XXX"}),
+			cState: unitStates{
+				"foo.service": unitState{
+					state: jsLaunched,
+					hash:  emptyStringHash,
+				},
+			},
+			uName: "foo.service",
+			chain: &taskChain{
+				unit: &job.Unit{
+					Name: "foo.service",
+				},
+				tasks: []task{
+					task{
+						typ:    taskTypeUnloadUnit,
+						reason: taskReasonLoadedButNotScheduled,
+					},
 				},
 			},
 		},
 
 		// unload jobs that have an inactive target state
 		{
-			mState: &machine.MachineState{ID: "XXX"},
-			dState: &agentState{
-				jobs: map[string]*job.Job{
-					"foo.service": &job.Job{
+			dState: &AgentState{
+				MState: &machine.MachineState{ID: "XXX"},
+				Units: map[string]*job.Unit{
+					"foo.service": &job.Unit{
 						TargetState: jsInactive,
 					},
 				},
 			},
-			cState: &agentState{
-				jobs: map[string]*job.Job{
-					"foo.service": &job.Job{State: &jsLoaded},
+			cState: unitStates{
+				"foo.service": unitState{
+					state: jsLoaded,
+					hash:  emptyStringHash,
 				},
 			},
-			jName: "foo.service",
-			tasks: []task{
-				task{
-					Type:   taskTypeUnloadJob,
-					Job:    &job.Job{State: &jsLoaded},
-					Reason: taskReasonLoadedButNotScheduled,
+			uName: "foo.service",
+			chain: &taskChain{
+				unit: &job.Unit{
+					Name: "foo.service",
 				},
-			},
-		},
-
-		// unschedule jobs that can not run locally
-		{
-			mState: &machine.MachineState{ID: "XXX"},
-			dState: &agentState{
-				jobs: map[string]*job.Job{
-					"foo.service": &job.Job{
-						TargetState: jsLaunched,
-						Unit:        fleetUnit(t, "X-ConditionMachineID=YYY"),
+				tasks: []task{
+					task{
+						typ:    taskTypeUnloadUnit,
+						reason: taskReasonLoadedButNotScheduled,
 					},
-				},
-			},
-			cState: newAgentState(),
-			jName:  "foo.service",
-			tasks: []task{
-				task{
-					Type: taskTypeUnscheduleJob,
-					Job: &job.Job{
-						TargetState: jsLaunched,
-						Unit:        fleetUnit(t, "X-ConditionMachineID=YYY"),
-					},
-					Reason: taskReasonScheduledButNotRunnable,
-				},
-				task{
-					Type: taskTypeUnloadJob,
-					Job: &job.Job{
-						TargetState: jsLaunched,
-						Unit:        fleetUnit(t, "X-ConditionMachineID=YYY"),
-					},
-					Reason: taskReasonScheduledButNotRunnable,
 				},
 			},
 		},
@@ -365,96 +709,15 @@ func TestCalculateTasksForJob(t *testing.T) {
 
 	for i, tt := range tests {
 		ar := NewReconciler(registry.NewFakeRegistry(), nil)
-		taskchan := make(chan *task)
-		tasks := []task{}
-		go func() {
-			ar.calculateTasksForJob(tt.mState, tt.dState, tt.cState, tt.jName, taskchan)
-			close(taskchan)
-		}()
-
-		for t := range taskchan {
-			tasks = append(tasks, *t)
-		}
-
-		if !reflect.DeepEqual(tt.tasks, tasks) {
-			t.Errorf("case %d: calculated incorrect list of tasks\nexpected=%v\nreceived=%v\n", i, tt.tasks, tasks)
-		}
-	}
-}
-
-func TestCalculateTasksForOffer(t *testing.T) {
-	tests := []struct {
-		mState *machine.MachineState
-		dState *agentState
-		job    *job.Job
-		bids   pkg.Set
-
-		tasks []task
-	}{
-		// no bid submitted yet and able to run
-		{
-			mState: &machine.MachineState{ID: "XXX"},
-			dState: newAgentState(),
-			job: &job.Job{
-				Name:        "foo.service",
-				TargetState: jsLaunched,
-				Unit:        fleetUnit(t),
-			},
-			bids: pkg.NewUnsafeSet(),
-			tasks: []task{
-				task{
-					Type: taskTypeSubmitBid,
-					Job: &job.Job{
-						Name:        "foo.service",
-						TargetState: jsLaunched,
-						Unit:        fleetUnit(t),
-					},
-					Reason: taskReasonAbleToResolveOffer,
-				},
-			},
-		},
-
-		// no bid submitted but unable to run
-		{
-			mState: &machine.MachineState{ID: "XXX"},
-			dState: newAgentState(),
-			job: &job.Job{
-				Name:        "foo.service",
-				TargetState: jsLaunched,
-				Unit:        fleetUnit(t, "X-ConditionMachineID=YYY"),
-			},
-			bids:  pkg.NewUnsafeSet(),
-			tasks: []task{},
-		},
-
-		// bid already submitted
-		{
-			mState: &machine.MachineState{ID: "XXX"},
-			dState: newAgentState(),
-			job: &job.Job{
-				TargetState: jsLaunched,
-				Unit:        fleetUnit(t),
-			},
-			bids:  pkg.NewUnsafeSet("XXX"),
-			tasks: []task{},
-		},
-	}
-
-	for i, tt := range tests {
-		ar := NewReconciler(registry.NewFakeRegistry(), nil)
-		taskchan := make(chan *task)
-		tasks := []task{}
-		go func() {
-			ar.calculateTasksForOffer(tt.dState, tt.mState, tt.job, tt.bids, taskchan)
-			close(taskchan)
-		}()
-
-		for t := range taskchan {
-			tasks = append(tasks, *t)
-		}
-
-		if !reflect.DeepEqual(tt.tasks, tasks) {
-			t.Errorf("case %d: calculated incorrect list of tasks\nexpected=%v\nreceived=%v\n", i, tt.tasks, tasks)
+		chain := ar.calculateTaskChainForUnit(tt.dState, tt.cState, tt.uName)
+		if !reflect.DeepEqual(tt.chain, chain) {
+			t.Errorf("case %d: calculated incorrect task chain\nexpected=%#v\nreceived=%#v\n", i, tt.chain, chain)
+			if c := tt.chain; c != nil {
+				t.Logf("expected Unit: %#v", *c.unit)
+			}
+			if c := chain; c != nil {
+				t.Logf("received Unit: %#v", *c.unit)
+			}
 		}
 	}
 }

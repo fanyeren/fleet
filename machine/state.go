@@ -1,6 +1,20 @@
-package machine
+/*
+   Copyright 2014 CoreOS, Inc.
 
-import "github.com/coreos/fleet/resource"
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
+package machine
 
 const (
 	shortIDLen = 8
@@ -13,29 +27,6 @@ type MachineState struct {
 	PublicIP string
 	Metadata map[string]string
 	Version  string
-
-	// The total resources available on the underlying system
-	TotalResources resource.ResourceTuple
-
-	// The resoures considered available for scheduling by fleet
-	FreeResources resource.ResourceTuple
-
-	// Number of Units loaded into the fleet agent
-	LoadedUnits int
-}
-
-// UpdateFreeResources populates the FreeResources of a MachineState, given a
-// map of units to resource reservations, using the following formula:
-// FreeResources = TotalResources - (sum(unit resource reservations) + HostResources)
-func UpdateFreeResources(ms MachineState, reservations map[string]resource.ResourceTuple) MachineState {
-	all := []resource.ResourceTuple{resource.HostResources}
-	for _, res := range reservations {
-		all = append(all, res)
-	}
-	reserved := resource.Sum(all...)
-	// TODO(jonboulle): check for negatives!
-	ms.FreeResources = resource.Sub(ms.TotalResources, reserved)
-	return ms
 }
 
 func (ms MachineState) ShortID() string {
@@ -60,18 +51,6 @@ func stackState(top, bottom MachineState) MachineState {
 
 	if top.ID != "" {
 		state.ID = top.ID
-	}
-
-	if top.TotalResources.Cores > 0 {
-		state.TotalResources.Cores = top.TotalResources.Cores
-	}
-
-	if top.TotalResources.Memory > 0 {
-		state.TotalResources.Memory = top.TotalResources.Memory
-	}
-
-	if top.TotalResources.Disk > 0 {
-		state.TotalResources.Disk = top.TotalResources.Disk
 	}
 
 	//FIXME: This will *always* overwrite the bottom's metadata,

@@ -1,3 +1,19 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package registry
 
 import (
@@ -5,46 +21,75 @@ import (
 	"testing"
 
 	"github.com/coreos/fleet/etcd"
-	"github.com/coreos/fleet/event"
+	"github.com/coreos/fleet/pkg"
 )
 
 func TestFilterEtcdEvents(t *testing.T) {
 	tests := []struct {
-		in *etcd.Result
-		ev *event.Event
+		in string
+		ev pkg.Event
+		ok bool
 	}{
 		{
-			in: nil,
-			ev: nil,
+			in: "",
+			ok: false,
 		},
 		{
-			in: &etcd.Result{Node: &etcd.Node{Key: "/"}},
-			ev: nil,
+			in: "/",
+			ok: false,
 		},
 		{
-			in: &etcd.Result{Node: &etcd.Node{Key: "/fleet"}},
-			ev: &event.GlobalEvent,
+			in: "/fleet",
+			ok: false,
 		},
 		{
-			in: &etcd.Result{Node: &etcd.Node{Key: "/fleet/job"}},
-			ev: &event.JobEvent,
+			in: "/fleet/job",
+			ok: false,
+		},
+		{
+			in: "/fleet/job/foo/object",
+			ok: false,
+		},
+		{
+			in: "/fleet/machine/asdf",
+			ok: false,
+		},
+		{
+			in: "/fleet/state/asdf",
+			ok: false,
+		},
+		{
+			in: "/fleet/job/foobarbaz/target-state",
+			ev: JobTargetStateChangeEvent,
+			ok: true,
+		},
+		{
+			in: "/fleet/job/asdf/target",
+			ev: JobTargetChangeEvent,
+			ok: true,
 		},
 	}
 
 	for i, tt := range tests {
-		etcdchan := make(chan *etcd.Result)
-		stopchan := make(chan bool)
-		prefix := "/fleet"
+		for _, action := range []string{"set", "update", "create", "delete"} {
+			prefix := "/fleet"
 
-		send := func(ev *event.Event) {
+			res := &etcd.Result{
+				Node: &etcd.Node{
+					Key: tt.in,
+				},
+				Action: action,
+			}
+			ev, ok := parse(res, prefix)
+			if ok != tt.ok {
+				t.Errorf("case %d: expected ok=%t, got %t", i, tt.ok, ok)
+				continue
+			}
+
 			if !reflect.DeepEqual(tt.ev, ev) {
 				t.Errorf("case %d: received incorrect event\nexpected %#v\ngot %#v", i, tt.ev, ev)
+				t.Logf("action: %v", action)
 			}
 		}
-
-		go filter(etcdchan, prefix, send, stopchan)
-
-		etcdchan <- tt.in
-		close(stopchan)
 	}
 }

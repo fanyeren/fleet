@@ -1,38 +1,28 @@
 {
 	"ImportPath": "github.com/coreos/fleet",
-	"GoVersion": "go1.3",
+	"GoVersion": "go1.3.3",
 	"Packages": [
 		"./..."
 	],
 	"Deps": [
-		{
-			"ImportPath": "code.google.com/p/google-api-go-client/googleapi",
-			"Comment": "release-87",
-			"Rev": "c99e2061b8c60e8c9066434f77bb0d0ac5b34377"
-		},
-		{
-			"ImportPath": "code.google.com/p/gosshnew/ssh",
-			"Comment": "null-156",
-			"Rev": "841c53ee2005900291ddc3e98e870f8f2f6a9d80"
-		},
 		{
 			"ImportPath": "github.com/coreos/go-semver/semver",
 			"Rev": "a9a0c39c7e4a2929f73d4b757d1860fbb8e66d06"
 		},
 		{
 			"ImportPath": "github.com/coreos/go-systemd/activation",
-			"Comment": "v2-18-g219f3f1",
-			"Rev": "219f3f19eea4de69bd7261b3b1ef4848f652f790"
+			"Comment": "v2-35-gcf3cdf7",
+			"Rev": "cf3cdf77462baaad163ad2d5d1984b9c1b493701"
 		},
 		{
 			"ImportPath": "github.com/coreos/go-systemd/dbus",
-			"Comment": "v2-18-g219f3f1",
-			"Rev": "219f3f19eea4de69bd7261b3b1ef4848f652f790"
+			"Comment": "v2-35-gcf3cdf7",
+			"Rev": "cf3cdf77462baaad163ad2d5d1984b9c1b493701"
 		},
 		{
 			"ImportPath": "github.com/coreos/go-systemd/unit",
-			"Comment": "v2-18-g219f3f1",
-			"Rev": "219f3f19eea4de69bd7261b3b1ef4848f652f790"
+			"Comment": "v2-35-gcf3cdf7",
+			"Rev": "cf3cdf77462baaad163ad2d5d1984b9c1b493701"
 		},
 		{
 			"ImportPath": "github.com/docker/libcontainer/netlink",
@@ -41,12 +31,12 @@
 		},
 		{
 			"ImportPath": "github.com/godbus/dbus",
-			"Comment": "0",
-			"Rev": "cb98efbb933d8389ab549a060e880ea3c375d213"
+			"Comment": "0-11-gcfab99a",
+			"Rev": "cfab99a9500db4ba03067996059d2fc425090bf3"
 		},
 		{
-			"ImportPath": "github.com/golang/glog",
-			"Rev": "20cea4dfef0c0151bba0422a6244cc1d3e8292b1"
+			"ImportPath": "github.com/jonboulle/clockwork",
+			"Rev": "b473f398c464f1988327f67c9e6aa7fba62f80d2"
 		},
 		{
 			"ImportPath": "github.com/rakyll/globalconf",
@@ -55,6 +45,19 @@
 		{
 			"ImportPath": "github.com/rakyll/goini",
 			"Rev": "907cca0f578a5316fb864ec6992dc3d9730ec58c"
+		},
+		{
+			"ImportPath": "golang.org/x/crypto/ssh",
+			"Comment": "null-234",
+			"Rev": "60a80aaa50ff0e8506f61b1fa35078a24941be50"
+		},
+		{
+			"ImportPath": "google.golang.org/api/google-api-go-generator",
+			"Rev": "d3edb0282bde692467788c50070a9211afe75cf3"
+		},
+		{
+			"ImportPath": "google.golang.org/api/googleapi",
+			"Rev": "d3edb0282bde692467788c50070a9211afe75cf3"
 		}
 	]
 }

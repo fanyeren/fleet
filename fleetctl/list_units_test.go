@@ -1,3 +1,19 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package main
 
 import (
@@ -6,24 +22,8 @@ import (
 	"github.com/coreos/fleet/job"
 	"github.com/coreos/fleet/machine"
 	"github.com/coreos/fleet/registry"
-	"github.com/coreos/fleet/unit"
+	"github.com/coreos/fleet/schema"
 )
-
-func newNamedTestJobFromUnitContents(t *testing.T, name, contents string) *job.Job {
-	u, err := unit.NewUnit(contents)
-	if err != nil {
-		t.Fatalf("error creating Unit from %q: %v", contents, err)
-	}
-	j := job.NewJob(name, *u)
-	if j == nil {
-		t.Fatalf("error creating Job %q from %q", name, u)
-	}
-	return j
-}
-
-func newTestJobFromUnitContents(t *testing.T, contents string) *job.Job {
-	return newNamedTestJobFromUnitContents(t, "foo.service", contents)
-}
 
 func newFakeRegistryForListUnits(t *testing.T, jobs []job.Job) registry.Registry {
 	reg := registry.NewFakeRegistry()
@@ -38,55 +38,49 @@ func assertEqual(t *testing.T, name string, want, got interface{}) {
 }
 
 func TestListUnitsFieldsToStrings(t *testing.T) {
-	j := newTestJobFromUnitContents(t, "")
-	for _, tt := range []string{"state", "load", "active", "sub", "desc", "machine"} {
-		f := listUnitsFields[tt](j, false)
+	// nil UnitState shouldn't happen, but just in case
+	for _, tt := range []string{"unit", "load", "active", "sub", "machine", "hash"} {
+		f := listUnitsFields[tt](nil, false)
 		assertEqual(t, tt, "-", f)
 	}
 
-	f := listUnitsFields["unit"](j, false)
-	assertEqual(t, "unit", j.Name, f)
-
-	j = newTestJobFromUnitContents(t, `[Unit]
-Description=some description`)
-	d := listUnitsFields["desc"](j, false)
-	assertEqual(t, "desc", "some description", d)
-
-	for _, state := range []job.JobState{job.JobStateLoaded, job.JobStateInactive, job.JobStateLaunched} {
-		j.State = &state
-		f := listUnitsFields["state"](j, false)
-		assertEqual(t, "state", string(state), f)
+	us := &schema.UnitState{
+		Name:               "sleep",
+		SystemdLoadState:   "foo",
+		SystemdActiveState: "bar",
+		SystemdSubState:    "baz",
+		MachineID:          "",
 	}
 
-	j.UnitState = unit.NewUnitState("foo", "bar", "baz", "")
 	for k, want := range map[string]string{
 		"load":    "foo",
 		"active":  "bar",
 		"sub":     "baz",
 		"machine": "-",
+		"unit":    "sleep",
 	} {
-		got := listUnitsFields[k](j, false)
+		got := listUnitsFields[k](us, false)
 		assertEqual(t, k, want, got)
 	}
 
-	j.UnitState.MachineID = "some-id"
-	ms := listUnitsFields["machine"](j, true)
+	us.MachineID = "some-id"
+	ms := listUnitsFields["machine"](us, true)
 	assertEqual(t, "machine", "some-id", ms)
 
-	j.UnitState.MachineID = "other-id"
+	us.MachineID = "other-id"
 	machineStates = map[string]*machine.MachineState{
 		"other-id": &machine.MachineState{
 			ID:       "other-id",
 			PublicIP: "1.2.3.4",
 		},
 	}
-	ms = listUnitsFields["machine"](j, true)
+	ms = listUnitsFields["machine"](us, true)
 	assertEqual(t, "machine", "other-id/1.2.3.4", ms)
 
-	uh := "f035b2f14edc4d23572e5f3d3d4cb4f78d0e53c3"
-	j.UnitState.UnitHash = uh
-	fuh := listUnitsFields["hash"](j, true)
-	suh := listUnitsFields["hash"](j, false)
+	uh := "a0f275d46bc6ee0eca06be7c339913c07d99c0c7"
+	us.Hash = uh
+	fuh := listUnitsFields["hash"](us, true)
+	suh := listUnitsFields["hash"](us, false)
 	assertEqual(t, "hash", uh, fuh)
 	assertEqual(t, "hash", uh[:7], suh)
 }

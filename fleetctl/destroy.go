@@ -1,8 +1,20 @@
-package main
+/*
+   Copyright 2014 CoreOS, Inc.
 
-import (
-	"fmt"
-)
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
+package main
 
 var cmdDestroyUnit = &Command{
 	Name:    "destroy",
@@ -21,8 +33,12 @@ Destroyed units are impossible to start unless re-submitted.`,
 func runDestroyUnits(args []string) (exit int) {
 	for _, v := range args {
 		name := unitNameMangle(v)
-		cAPI.DestroyJob(name)
-		fmt.Printf("Destroyed Job %s\n", name)
+		err := cAPI.DestroyUnit(name)
+		if err != nil {
+			continue
+		}
+
+		stdout("Destroyed %s", name)
 	}
 	return
 }

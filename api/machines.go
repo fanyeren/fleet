@@ -1,3 +1,19 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package api
 
 import (
@@ -5,21 +21,20 @@ import (
 	"net/http"
 	"path"
 
-	log "github.com/coreos/fleet/Godeps/_workspace/src/github.com/golang/glog"
-
+	"github.com/coreos/fleet/client"
+	"github.com/coreos/fleet/log"
 	"github.com/coreos/fleet/machine"
-	"github.com/coreos/fleet/registry"
 	"github.com/coreos/fleet/schema"
 )
 
-func wireUpMachinesResource(mux *http.ServeMux, prefix string, reg registry.Registry) {
+func wireUpMachinesResource(mux *http.ServeMux, prefix string, cAPI client.API) {
 	res := path.Join(prefix, "machines")
-	mr := machinesResource{reg}
+	mr := machinesResource{cAPI}
 	mux.Handle(res, &mr)
 }
 
 type machinesResource struct {
-	reg registry.Registry
+	cAPI client.API
 }
 
 func (mr *machinesResource) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
@@ -39,7 +54,7 @@ func (mr *machinesResource) ServeHTTP(rw http.ResponseWriter, req *http.Request)
 		token = &def
 	}
 
-	page, err := getMachinePage(mr.reg, *token)
+	page, err := getMachinePage(mr.cAPI, *token)
 	if err != nil {
 		log.Errorf("Failed fetching page of Machines: %v", err)
 		sendError(rw, http.StatusInternalServerError, nil)
@@ -49,8 +64,8 @@ func (mr *machinesResource) ServeHTTP(rw http.ResponseWriter, req *http.Request)
 	sendResponse(rw, http.StatusOK, page)
 }
 
-func getMachinePage(reg registry.Registry, tok PageToken) (*schema.MachinePage, error) {
-	all, err := reg.Machines()
+func getMachinePage(cAPI client.API, tok PageToken) (*schema.MachinePage, error) {
+	all, err := cAPI.Machines()
 	if err != nil {
 		return nil, err
 	}
@@ -92,21 +107,7 @@ func newMachinePage(items []machine.MachineState, tok *PageToken) *schema.Machin
 	}
 
 	for _, sm := range items {
-		smp.Machines = append(smp.Machines, mapMachineStateToSchema(&sm))
+		smp.Machines = append(smp.Machines, schema.MapMachineStateToSchema(&sm))
 	}
 	return &smp
-}
-
-func mapMachineStateToSchema(ms *machine.MachineState) *schema.Machine {
-	sm := schema.Machine{
-		Id:        ms.ID,
-		PrimaryIP: ms.PublicIP,
-	}
-
-	sm.Metadata = make(map[string]string, len(ms.Metadata))
-	for k, v := range ms.Metadata {
-		sm.Metadata[k] = v
-	}
-
-	return &sm
 }

@@ -1,3 +1,19 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package agent
 
 import (
@@ -5,49 +21,66 @@ import (
 	"testing"
 
 	"github.com/coreos/fleet/job"
+	"github.com/coreos/fleet/machine"
 	"github.com/coreos/fleet/unit"
 )
 
+func fleetUnit(t *testing.T, opts ...string) unit.UnitFile {
+	contents := "[X-Fleet]"
+	for _, v := range opts {
+		contents = fmt.Sprintf("%s\n%s", contents, v)
+	}
+
+	u, err := unit.NewUnitFile(contents)
+	if u == nil || err != nil {
+		t.Fatalf("Failed creating test unit: unit=%v, err=%v", u, err)
+	}
+
+	return *u
+}
+
 func TestHasConflicts(t *testing.T) {
 	tests := []struct {
-		cState   *agentState
+		cState   *AgentState
 		job      *job.Job
 		want     bool
 		conflict string
 	}{
 		// empty current state causes no conflicts
 		{
-			cState: newAgentState(),
-			job:    &job.Job{Name: "foo.service", Unit: fleetUnit(t, "X-Conflicts=bar.service")},
+			cState: NewAgentState(&machine.MachineState{ID: "XXX"}),
+			job:    &job.Job{Name: "foo.service", Unit: fleetUnit(t, "Conflicts=bar.service")},
 			want:   false,
 		},
 
 		// existing Job has conflict with new Job
 		{
-			cState: &agentState{
-				jobs: map[string]*job.Job{
-					"bar.service": &job.Job{
+			cState: &AgentState{
+				MState: &machine.MachineState{ID: "XXX"},
+				Units: map[string]*job.Unit{
+					"bar.service": &job.Unit{
 						Name: "bar.service",
-						Unit: fleetUnit(t, "X-Conflicts=foo.service"),
+						Unit: fleetUnit(t, "Conflicts=foo.service"),
 					},
 				},
 			},
-			job:      &job.Job{Name: "foo.service", Unit: unit.Unit{}},
+			job:      &job.Job{Name: "foo.service", Unit: unit.UnitFile{}},
 			want:     true,
 			conflict: "bar.service",
 		},
 
 		// new Job has conflict with existing job
 		{
-			cState: &agentState{
-				jobs: map[string]*job.Job{
-					"bar.service": &job.Job{
+			cState: &AgentState{
+				MState: &machine.MachineState{ID: "XXX"},
+				Units: map[string]*job.Unit{
+					"bar.service": &job.Unit{
 						Name: "bar.service",
-						Unit: unit.Unit{},
+						Unit: unit.UnitFile{},
 					},
 				},
 			},
-			job:      &job.Job{Name: "foo.service", Unit: fleetUnit(t, "X-Conflicts=bar.service")},
+			job:      &job.Job{Name: "foo.service", Unit: fleetUnit(t, "Conflicts=bar.service")},
 			want:     true,
 			conflict: "bar.service",
 		},

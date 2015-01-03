@@ -1,97 +1,131 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package engine
 
 import (
 	"fmt"
 	"time"
 
-	log "github.com/coreos/fleet/Godeps/_workspace/src/github.com/golang/glog"
-
-	"github.com/coreos/fleet/job"
+	"github.com/coreos/fleet/log"
 	"github.com/coreos/fleet/machine"
+	"github.com/coreos/fleet/pkg"
 	"github.com/coreos/fleet/registry"
 )
 
 const (
-	// time between triggering reconciliation routine
-	reconcileInterval = 2 * time.Second
+	// name of lease that must be held by the lead engine in a cluster
+	engineLeaseName = "engine-leader"
 
-	// name of role that represents the lead engine in a cluster
-	engineRoleName = "engine-leader"
-	// time the role will be leased before the lease must be renewed
-	engineRoleLeasePeriod = 10 * time.Second
+	// version at which the current engine code operates
+	engineVersion = 1
 )
 
 type Engine struct {
-	rec      Reconciler
-	registry registry.Registry
-	machine  machine.Machine
+	rec       *Reconciler
+	registry  registry.Registry
+	cRegistry registry.ClusterRegistry
+	lRegistry registry.LeaseRegistry
+	rStream   pkg.EventStream
+	machine   machine.Machine
 
 	lease   registry.Lease
 	trigger chan struct{}
 }
 
-func New(reg registry.Registry, mach machine.Machine) *Engine {
-	rec := &dumbReconciler{}
-	return &Engine{rec, reg, mach, nil, make(chan struct{})}
+func New(reg *registry.EtcdRegistry, rStream pkg.EventStream, mach machine.Machine) *Engine {
+	rec := NewReconciler()
+	return &Engine{
+		rec:       rec,
+		registry:  reg,
+		cRegistry: reg,
+		lRegistry: reg,
+		rStream:   rStream,
+		machine:   mach,
+		trigger:   make(chan struct{}),
+	}
 }
 
-func (e *Engine) Run(stop chan bool) {
-	ticker := time.Tick(reconcileInterval)
+func (e *Engine) Run(ival time.Duration, stop chan bool) {
+	leaseTTL := ival * 5
 	machID := e.machine.State().ID
 
 	reconcile := func() {
-		done := make(chan struct{})
-		defer func() { close(done) }()
-		// While the reconciliation is running, flush the trigger channel in the background
-		go func() {
-			for {
-				select {
-				case <-done:
-					return
-				default:
-					select {
-					case <-e.trigger:
-					case <-done:
-						return
-					}
-				}
-			}
-		}()
-
-		e.lease = ensureLeader(e.lease, e.registry, machID)
-		if e.lease == nil {
+		if !ensureEngineVersionMatch(e.cRegistry, engineVersion) {
 			return
 		}
 
+		var l registry.Lease
+		if isLeader(e.lease, machID) {
+			l = renewLeadership(e.lease, leaseTTL)
+		} else {
+			l = acquireLeadership(e.lRegistry, machID, engineVersion, leaseTTL)
+		}
+
+		// log all leadership changes
+		if l != nil && e.lease == nil && l.MachineID() != machID {
+			log.Infof("Engine leader is %s", l.MachineID())
+		} else if l != nil && e.lease != nil && l.MachineID() != e.lease.MachineID() {
+			log.Infof("Engine leadership changed from %s to %s", e.lease.MachineID(), l.MachineID())
+		}
+
+		e.lease = l
+
+		if !isLeader(e.lease, machID) {
+			return
+		}
+
+		// abort is closed when reconciliation must stop prematurely, either
+		// by a local timeout or the fleet server shutting down
+		abort := make(chan struct{})
+
+		// monitor is used to shut down the following goroutine
+		monitor := make(chan struct{})
+
+		go func() {
+			select {
+			case <-monitor:
+				return
+			case <-time.After(leaseTTL):
+				close(abort)
+			case <-stop:
+				close(abort)
+			}
+		}()
+
 		start := time.Now()
-		e.rec.Reconcile(e)
+		e.rec.Reconcile(e, abort)
+		close(monitor)
 		elapsed := time.Now().Sub(start)
 
 		msg := fmt.Sprintf("Engine completed reconciliation in %s", elapsed)
-		if elapsed > reconcileInterval {
+		if elapsed > ival {
 			log.Warning(msg)
 		} else {
 			log.V(1).Info(msg)
 		}
 	}
 
-	for {
-		select {
-		case <-stop:
-			log.V(1).Info("Engine exiting due to stop signal")
-			return
-		case <-ticker:
-			log.V(1).Info("Engine tick")
-			reconcile()
-		case <-e.trigger:
-			log.V(1).Info("Engine reconcilation triggered by job state change")
-			reconcile()
-		}
-	}
+	rec := pkg.NewPeriodicReconciler(ival, reconcile, e.rStream)
+	rec.Run(stop)
 }
 
 func (e *Engine) Purge() {
-	if e.lease == nil {
+	// only purge the lease if we are the leader
+	if !isLeader(e.lease, e.machine.State().ID) {
 		return
 	}
 	err := e.lease.Release()
@@ -100,30 +134,93 @@ func (e *Engine) Purge() {
 	}
 }
 
-// ensureLeader will attempt to renew a non-nil Lease, falling back to
-// acquiring a new Lease on the lead engine role.
-func ensureLeader(prev registry.Lease, reg registry.Registry, machID string) (cur registry.Lease) {
-	if prev != nil {
-		err := prev.Renew(engineRoleLeasePeriod)
-		if err == nil {
-			cur = prev
-			return
-		} else {
-			log.Errorf("Engine leadership could not be renewed: %v", err)
-		}
+func isLeader(l registry.Lease, machID string) bool {
+	if l == nil {
+		return false
 	}
+	if l.MachineID() != machID {
+		return false
+	}
+	return true
+}
 
-	var err error
-	cur, err = reg.LeaseRole(engineRoleName, machID, engineRoleLeasePeriod)
+func ensureEngineVersionMatch(cReg registry.ClusterRegistry, expect int) bool {
+	v, err := cReg.EngineVersion()
 	if err != nil {
-		log.Errorf("Failed acquiring engine leadership: %v", err)
-	} else if cur == nil {
-		log.V(1).Infof("Unable to acquire engine leadership")
-	} else {
-		log.Infof("Acquired engine leadership")
+		log.Errorf("Unable to determine cluster engine version")
+		return false
 	}
 
-	return
+	if v < expect {
+		err = cReg.UpdateEngineVersion(v, expect)
+		if err != nil {
+			log.Errorf("Failed updating cluster engine version from %d to %d: %v", v, expect, err)
+			return false
+		}
+		log.Infof("Updated cluster engine version from %d to %d", v, expect)
+	} else if v > expect {
+		log.V(1).Infof("Cluster engine version higher than local engine version (%d > %d), unable to participate", v, expect)
+		return false
+	}
+
+	return true
+}
+
+func acquireLeadership(lReg registry.LeaseRegistry, machID string, ver int, ttl time.Duration) registry.Lease {
+	existing, err := lReg.GetLease(engineLeaseName)
+	if err != nil {
+		log.Errorf("Unable to determine current lessee: %v", err)
+		return nil
+	}
+
+	var l registry.Lease
+	if existing == nil {
+		l, err = lReg.AcquireLease(engineLeaseName, machID, ver, ttl)
+		if err != nil {
+			log.Errorf("Engine leadership acquisition failed: %v", err)
+			return nil
+		} else if l == nil {
+			log.V(1).Infof("Unable to acquire engine leadership")
+			return nil
+		}
+		log.Infof("Engine leadership acquired")
+		return l
+	}
+
+	if existing.Version() >= ver {
+		log.V(1).Infof("Lease already held by Machine(%s) operating at acceptable version %d", existing.MachineID(), existing.Version())
+		return existing
+	}
+
+	rem := existing.TimeRemaining()
+	l, err = lReg.StealLease(engineLeaseName, machID, ver, ttl+rem, existing.Index())
+	if err != nil {
+		log.Errorf("Engine leadership steal failed: %v", err)
+		return nil
+	} else if l == nil {
+		log.V(1).Infof("Unable to steal engine leadership")
+		return nil
+	}
+
+	log.Infof("Stole engine leadership from Machine(%s)", existing.MachineID())
+
+	if rem > 0 {
+		log.Infof("Waiting %v for previous lease to expire before continuing reconciliation", rem)
+		<-time.After(rem)
+	}
+
+	return l
+}
+
+func renewLeadership(l registry.Lease, ttl time.Duration) registry.Lease {
+	err := l.Renew(ttl)
+	if err != nil {
+		log.Errorf("Engine leadership lost, renewal failed: %v", err)
+		return nil
+	}
+
+	log.V(1).Infof("Engine leadership renewed")
+	return l
 }
 
 func (e *Engine) Trigger() {
@@ -131,15 +228,15 @@ func (e *Engine) Trigger() {
 }
 
 func (e *Engine) clusterState() (*clusterState, error) {
-	jobs, err := e.registry.Jobs()
+	units, err := e.registry.Units()
 	if err != nil {
-		log.Errorf("Failed fetching Jobs from Registry: %v", err)
+		log.Errorf("Failed fetching Units from Registry: %v", err)
 		return nil, err
 	}
 
-	offers, err := e.registry.UnresolvedJobOffers()
+	sUnits, err := e.registry.Schedule()
 	if err != nil {
-		log.Errorf("Failed fetching JobOffers from Registry: %v", err)
+		log.Errorf("Failed fetching schedule from Registry: %v", err)
 		return nil, err
 	}
 
@@ -149,63 +246,29 @@ func (e *Engine) clusterState() (*clusterState, error) {
 		return nil, err
 	}
 
-	return newClusterState(jobs, offers, machines), nil
+	return newClusterState(units, sUnits, machines), nil
 }
 
-func (e *Engine) resolveJobOffer(jName string) (err error) {
-	err = e.registry.ResolveJobOffer(jName)
+func (e *Engine) unscheduleUnit(name, machID string) (err error) {
+	err = e.registry.UnscheduleUnit(name, machID)
 	if err != nil {
-		log.Errorf("Failed resolving JobOffer(%s): %v", jName, err)
+		log.Errorf("Failed unscheduling Unit(%s) from Machine(%s): %v", name, machID, err)
 	} else {
-		log.Infof("Resolved JobOffer(%s)", jName)
+		log.Infof("Unscheduled Job(%s) from Machine(%s)", name, machID)
 	}
 	return
 }
 
-func (e *Engine) unscheduleJob(jName, machID string) (err error) {
-	err = e.registry.ClearJobTarget(jName, machID)
+// attemptScheduleUnit tries to persist a scheduling decision in the
+// Registry, returning true on success. If any communication with the
+// Registry fails, false is returned.
+func (e *Engine) attemptScheduleUnit(name, machID string) bool {
+	err := e.registry.ScheduleUnit(name, machID)
 	if err != nil {
-		log.Errorf("Failed clearing target Machine(%s) of Job(%s): %v", machID, jName, err)
-	} else {
-		log.Infof("Unscheduled Job(%s) from Machine(%s)", jName, machID)
-	}
-	return
-}
-
-// attemptScheduleJob accepts a bid for the given Job and persists the
-// decision to the registry, returning true on success. If no bids exist or
-// if any communication with the Registry fails, false is returned.
-func (e *Engine) attemptScheduleJob(jName string) bool {
-	bids, err := e.registry.Bids(jName)
-	if err != nil {
-		log.Errorf("Failed determining open JobBids for JobOffer(%s): %v", jName, err)
+		log.Errorf("Failed scheduling Unit(%s) to Machine(%s): %v", name, machID, err)
 		return false
 	}
 
-	if bids.Length() == 0 {
-		log.V(1).Infof("No bids found for unresolved JobOffer(%s), unable to resolve", jName)
-		return false
-	}
-
-	choice := bids.Values()[0]
-
-	err = e.registry.ScheduleJob(jName, choice)
-	if err != nil {
-		log.Errorf("Failed scheduling Job(%s) to Machine(%s): %v", jName, choice, err)
-		return false
-	}
-
-	log.Infof("Scheduled Job(%s) to Machine(%s)", jName, choice)
+	log.Infof("Scheduled Unit(%s) to Machine(%s)", name, machID)
 	return true
-}
-
-func (e *Engine) offerJob(j *job.Job) (err error) {
-	offer := job.NewOfferFromJob(*j)
-	err = e.registry.CreateJobOffer(offer)
-	if err != nil {
-		log.Errorf("Failed publishing JobOffer(%s): %v", j.Name, err)
-	} else {
-		log.Infof("Published JobOffer(%s)", j.Name)
-	}
-	return
 }

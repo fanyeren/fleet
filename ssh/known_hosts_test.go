@@ -1,3 +1,19 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package ssh
 
 import (
@@ -6,9 +22,10 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"syscall"
 	"testing"
 
-	gossh "github.com/coreos/fleet/Godeps/_workspace/src/code.google.com/p/gosshnew/ssh"
+	gossh "github.com/coreos/fleet/Godeps/_workspace/src/golang.org/x/crypto/ssh"
 )
 
 const (
@@ -132,22 +149,34 @@ func TestHostKeyFile(t *testing.T) {
 	}
 }
 
-// TestHostKeyFile tests to read and write from wrong HostKeyFile
+// TestHostKeyFile tests that reading and writing the wrong host key file fails
 func TestWrongHostKeyFile(t *testing.T) {
+	// Non-existent host key file should fail
 	f := NewHostKeyFile(wrongHostFile)
 	_, err := f.GetHostKeys()
 	if err == nil {
 		t.Fatal("should fail to read wrong host file")
 	}
 	if _, ok := err.(*os.PathError); !ok {
-		t.Fatal("should fail to read wrong host file due to file miss")
+		t.Fatalf("should fail to read wrong host file due to file miss, but got %v", err)
 	}
 
+	// Create a host key file we do not have permission to read
 	os.OpenFile(wrongHostFile, os.O_CREATE, 0000)
 	defer os.Remove(wrongHostFile)
+	// If run as root, drop privileges temporarily
+	if id := syscall.Geteuid(); id == 0 {
+		if err := syscall.Setuid(12345); err != nil {
+			t.Fatalf("error setting uid: %v", err)
+		}
+		defer syscall.Setuid(id)
+	}
 	err = f.PutHostKey("", nil)
 	if err == nil {
-		t.Fatal("append to wrong host file")
+		t.Fatal("should fail to write wrong host file")
+	}
+	if !os.IsPermission(err) {
+		t.Fatalf("should fail to write wrong host file due to permission denied, but got %v", err)
 	}
 }
 

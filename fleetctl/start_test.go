@@ -1,8 +1,25 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package main
 
 import (
 	"time"
 
+	"github.com/coreos/fleet/client"
 	"github.com/coreos/fleet/job"
 	"github.com/coreos/fleet/machine"
 	"github.com/coreos/fleet/registry"
@@ -14,7 +31,7 @@ type BlockedFakeRegistry struct {
 	registry.FakeRegistry
 }
 
-func (b BlockedFakeRegistry) Job(name string) (*job.Job, error) {
+func (b *BlockedFakeRegistry) Unit(name string) (*job.Unit, error) {
 	if name == "hello.service" {
 		time.Sleep(500 * time.Millisecond)
 	}
@@ -26,7 +43,7 @@ func (b BlockedFakeRegistry) Job(name string) (*job.Job, error) {
 		}
 	}
 
-	return b.FakeRegistry.Job(name)
+	return b.FakeRegistry.Unit(name)
 }
 
 func setupRegistryForStart(echoAttempts int) {
@@ -45,17 +62,35 @@ func setupRegistryForStart(echoAttempts int) {
 		Metadata: map[string]string{"foo": "bar"},
 	}
 
-	js := unit.NewUnitState("loaded", "active", "listening", m1.ID)
-	js2 := unit.NewUnitState("loaded", "inactive", "dead", m2.ID)
-	js3 := unit.NewUnitState("loaded", "inactive", "dead", m2.ID)
-	js4 := unit.NewUnitState("loaded", "inactive", "dead", m3.ID)
+	states := []unit.UnitState{
+		unit.UnitState{
+			UnitName:    "pong.service",
+			LoadState:   "loaded",
+			ActiveState: "active",
+			SubState:    "listening",
+			MachineID:   m1.ID,
+		},
+		unit.UnitState{
+			UnitName:    "hello.service",
+			LoadState:   "loaded",
+			ActiveState: "inactive",
+			SubState:    "dead",
+			MachineID:   m2.ID,
+		},
+		unit.UnitState{
+			UnitName:    "echo.service",
+			LoadState:   "loaded",
+			ActiveState: "inactive",
+			SubState:    "dead",
+			MachineID:   m2.ID,
+		},
+	}
 
-	states := map[string]*unit.UnitState{"pong.service": js, "hello.service": js2, "echo.service": js3, "private.service": js4}
 	machines := []machine.MachineState{m1, m2, m3}
 
 	reg := registry.NewFakeRegistry()
 	reg.SetMachines(machines)
 	reg.SetUnitStates(states)
 
-	cAPI = &BlockedFakeRegistry{echoAttempts, *reg}
+	cAPI = &client.RegistryClient{Registry: &BlockedFakeRegistry{EchoAttempts: echoAttempts, FakeRegistry: *reg}}
 }

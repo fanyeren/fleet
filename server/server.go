@@ -1,3 +1,19 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package server
 
 import (
@@ -7,19 +23,17 @@ import (
 	"time"
 
 	"github.com/coreos/fleet/Godeps/_workspace/src/github.com/coreos/go-systemd/activation"
-	log "github.com/coreos/fleet/Godeps/_workspace/src/github.com/golang/glog"
 
 	"github.com/coreos/fleet/agent"
 	"github.com/coreos/fleet/api"
 	"github.com/coreos/fleet/config"
 	"github.com/coreos/fleet/engine"
 	"github.com/coreos/fleet/etcd"
-	"github.com/coreos/fleet/event"
 	"github.com/coreos/fleet/heart"
+	"github.com/coreos/fleet/log"
 	"github.com/coreos/fleet/machine"
 	"github.com/coreos/fleet/pkg"
 	"github.com/coreos/fleet/registry"
-	"github.com/coreos/fleet/sign"
 	"github.com/coreos/fleet/systemd"
 	"github.com/coreos/fleet/unit"
 	"github.com/coreos/fleet/version"
@@ -37,17 +51,23 @@ type Server struct {
 	usPub       *agent.UnitStatePublisher
 	usGen       *unit.UnitStateGenerator
 	engine      *engine.Engine
-	rStream     *registry.EventStream
-	eBus        *event.EventBus
 	mach        *machine.CoreOSMachine
 	hrt         heart.Heart
 	mon         *heart.Monitor
 	api         *api.Server
 
+	engineReconcileInterval time.Duration
+
 	stop chan bool
 }
 
 func New(cfg config.Config) (*Server, error) {
+	etcdRequestTimeout := time.Duration(cfg.EtcdRequestTimeout*1000) * time.Millisecond
+	agentTTL, err := time.ParseDuration(cfg.AgentTTL)
+	if err != nil {
+		return nil, err
+	}
+
 	mgr, err := systemd.NewSystemdUnitManager(systemd.DefaultUnitsDirectory)
 	if err != nil {
 		return nil, err
@@ -58,56 +78,42 @@ func New(cfg config.Config) (*Server, error) {
 		return nil, err
 	}
 
-	tlsConfig, err := etcd.TLSClientConfig(cfg.EtcdCAFile, cfg.EtcdCertFile, cfg.EtcdKeyFile)
+	tlsConfig, err := pkg.ReadTLSConfigFiles(cfg.EtcdCAFile, cfg.EtcdCertFile, cfg.EtcdKeyFile)
 	if err != nil {
 		return nil, err
 	}
 
-	eTrans := http.Transport{TLSClientConfig: tlsConfig}
-	timeout := time.Duration(cfg.EtcdRequestTimeout*1000) * time.Millisecond
-	eClient, err := etcd.NewClient(cfg.EtcdServers, eTrans, timeout)
+	eTrans := &http.Transport{TLSClientConfig: tlsConfig}
+	eClient, err := etcd.NewClient(cfg.EtcdServers, eTrans, etcdRequestTimeout)
 	if err != nil {
 		return nil, err
 	}
 
-	reg := registry.New(eClient, cfg.EtcdKeyPrefix)
+	reg := registry.NewEtcdRegistry(eClient, cfg.EtcdKeyPrefix)
 
-	pub := agent.NewUnitStatePublisher(mgr, reg, mach)
+	pub := agent.NewUnitStatePublisher(reg, mach, agentTTL)
 	gen := unit.NewUnitStateGenerator(mgr)
 
-	a, err := newAgentFromConfig(mach, reg, cfg, mgr, gen)
-	if err != nil {
-		return nil, err
-	}
+	a := agent.New(mgr, gen, reg, mach, agentTTL)
 
-	ar, err := newAgentReconcilerFromConfig(reg, cfg)
-	if err != nil {
-		return nil, err
-	}
+	rStream := registry.NewEtcdEventStream(eClient, cfg.EtcdKeyPrefix)
 
-	e := engine.New(reg, mach)
+	ar := agent.NewReconciler(reg, rStream)
 
-	rStream, err := registry.NewEventStream(eClient, reg)
-	if err != nil {
-		return nil, err
-	}
-
-	eBus := event.NewEventBus()
-	eBus.AddListener(event.JobEvent, ar.Trigger)
-	eBus.AddListener(event.GlobalEvent, e.Trigger)
+	e := engine.New(reg, rStream, mach)
 
 	listeners, err := activation.Listeners(false)
 	if err != nil {
 		return nil, err
 	}
 
-	hrt, mon, err := newHeartMonitorFromConfig(mach, reg, cfg)
-	if err != nil {
-		return nil, err
-	}
+	hrt := heart.New(reg, mach)
+	mon := heart.NewMonitor(agentTTL)
 
 	apiServer := api.NewServer(listeners, api.NewServeMux(reg))
 	apiServer.Serve()
+
+	eIval := time.Duration(cfg.EngineReconcileInterval*1000) * time.Millisecond
 
 	srv := Server{
 		agent:       a,
@@ -115,28 +121,15 @@ func New(cfg config.Config) (*Server, error) {
 		usGen:       gen,
 		usPub:       pub,
 		engine:      e,
-		rStream:     rStream,
-		eBus:        eBus,
 		mach:        mach,
 		hrt:         hrt,
 		mon:         mon,
 		api:         apiServer,
 		stop:        nil,
+		engineReconcileInterval: eIval,
 	}
 
 	return &srv, nil
-}
-
-func newHeartMonitorFromConfig(mach machine.Machine, reg registry.Registry, cfg config.Config) (hrt heart.Heart, mon *heart.Monitor, err error) {
-	var ttl time.Duration
-	ttl, err = time.ParseDuration(cfg.AgentTTL)
-	if err != nil {
-		return
-	}
-
-	hrt = heart.New(reg, mach)
-	mon = heart.NewMonitor(ttl)
-	return
 }
 
 func newMachineFromConfig(cfg config.Config, mgr unit.UnitManager) (*machine.CoreOSMachine, error) {
@@ -156,31 +149,12 @@ func newMachineFromConfig(cfg config.Config, mgr unit.UnitManager) (*machine.Cor
 	return mach, nil
 }
 
-func newAgentFromConfig(mach machine.Machine, reg registry.Registry, cfg config.Config, mgr unit.UnitManager, uGen *unit.UnitStateGenerator) (*agent.Agent, error) {
-	return agent.New(mgr, uGen, reg, mach, cfg.AgentTTL)
-}
-
-func newAgentReconcilerFromConfig(reg registry.Registry, cfg config.Config) (*agent.AgentReconciler, error) {
-	var verifier *sign.SignatureVerifier
-	if cfg.VerifyUnits {
-		var err error
-		verifier, err = sign.NewSignatureVerifierFromAuthorizedKeysFile(cfg.AuthorizedKeysFile)
-		if err != nil {
-			log.Errorf("Failed to get any key from authorized key file in verify_units mode: %v", err)
-			verifier = sign.NewSignatureVerifier()
-		}
-	}
-
-	return agent.NewReconciler(reg, verifier), nil
-}
-
 func (s *Server) Run() {
 	log.Infof("Establishing etcd connectivity")
 
-	var idx uint64
 	var err error
 	for sleep := time.Second; ; sleep = pkg.ExpBackoff(sleep, time.Minute) {
-		idx, err = s.hrt.Beat(s.mon.TTL)
+		_, err = s.hrt.Beat(s.mon.TTL)
 		if err == nil {
 			break
 		}
@@ -194,10 +168,9 @@ func (s *Server) Run() {
 	go s.Monitor()
 	go s.api.Available(s.stop)
 	go s.mach.PeriodicRefresh(machineStateRefreshInterval, s.stop)
-	go s.rStream.Stream(idx, s.eBus.Dispatch, s.stop)
 	go s.agent.Heartbeat(s.stop)
 	go s.aReconciler.Run(s.agent, s.stop)
-	go s.engine.Run(s.stop)
+	go s.engine.Run(s.engineReconcileInterval, s.stop)
 
 	beatchan := make(chan *unit.UnitStateHeartbeat)
 	go s.usGen.Run(beatchan, s.stop)
@@ -222,10 +195,19 @@ func (s *Server) Stop() {
 
 func (s *Server) Purge() {
 	s.aReconciler.Purge(s.agent)
+	s.usPub.Purge()
 	s.engine.Purge()
 	s.hrt.Clear()
 }
 
 func (s *Server) MarshalJSON() ([]byte, error) {
-	return json.Marshal(struct{ Agent *agent.Agent }{Agent: s.agent})
+	return json.Marshal(struct {
+		Agent              *agent.Agent
+		UnitStatePublisher *agent.UnitStatePublisher
+		UnitStateGenerator *unit.UnitStateGenerator
+	}{
+		Agent:              s.agent,
+		UnitStatePublisher: s.usPub,
+		UnitStateGenerator: s.usGen,
+	})
 }

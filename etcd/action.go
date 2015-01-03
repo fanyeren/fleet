@@ -1,3 +1,19 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package etcd
 
 import (
@@ -120,6 +136,7 @@ type Set struct {
 	Value         string
 	TTL           time.Duration
 	PreviousIndex uint64
+	PreviousValue string
 }
 
 func (s *Set) String() string {
@@ -132,6 +149,9 @@ func (s *Set) HTTPRequest() (*http.Request, error) {
 	params := endpoint.Query()
 	if s.PreviousIndex != 0 {
 		params.Add("prevIndex", strconv.FormatInt(int64(s.PreviousIndex), 10))
+	}
+	if s.PreviousValue != "" {
+		params.Add("prevValue", s.PreviousValue)
 	}
 	endpoint.RawQuery = params.Encode()
 

@@ -1,46 +1,29 @@
-package main
+/*
+   Copyright 2014 CoreOS, Inc.
 
-import (
-	"fmt"
-	"os"
-)
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
+package main
 
 var cmdVerifyUnit = &Command{
 	Name:    "verify",
-	Summary: "DEPRECATED - Verify unit file signatures using local SSH identities",
+	Summary: "DEPRECATED - No longer works",
 	Usage:   "UNIT",
-	Description: `This command is deprecated - it is being removed from fleetctl.
-	
-Outputs whether or not unit file fits its signature. Useful to secure
-the data of a unit.`,
-	Run: runVerifyUnit,
+	Run:     runVerifyUnit,
 }
 
 func runVerifyUnit(args []string) (exit int) {
-	fmt.Fprintln(os.Stderr, "WARNING: The signed/verified units feature is DEPRECATED and should not be used. It will be completely removed from fleet and fleetctl.")
-
-	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr, "One unit file must be provided.")
-		return 1
-	}
-
-	name := unitNameMangle(args[0])
-	j, err := cAPI.Job(name)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error retrieving Job %s: %v", name, err)
-		return 1
-	}
-	if j == nil {
-		fmt.Fprintf(os.Stderr, "Job %s not found.\n", name)
-		return 1
-	}
-
-	err = verifyJob(j)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
-		return 1
-	}
-
-	fmt.Printf("Succeeded verifying unit signature for Job %s.\n", j.Name)
-	return
+	stderr("WARNING: The signed/verified units feature is DEPRECATED and cannot be used.")
+	return 2
 }

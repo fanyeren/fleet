@@ -21,7 +21,7 @@
 # public_ip=""
 
 # Comma-delimited key/value pairs that are published to the fleet registry.
-# This data can be referenced in unit files to affect scheduling descisions.
+# This data can be referenced in unit files to affect scheduling decisions.
 # An example could look like: metadata="region=us-west,az=us-west-1"
 # metadata=""
 
@@ -29,3 +29,6 @@
 # communicate with the Registry. The agent will attempt a heartbeat at half
 # of this value.
 # agent_ttl="30s"
+
+# Interval at which the engine should reconcile the cluster schedule in etcd.
+# engine_reconcile_interval=2

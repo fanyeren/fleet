@@ -1,3 +1,19 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package main
 
 import (
@@ -7,8 +23,6 @@ import (
 	"os/exec"
 	"strings"
 	"syscall"
-
-	log "github.com/coreos/fleet/Godeps/_workspace/src/github.com/golang/glog"
 
 	"github.com/coreos/fleet/machine"
 	"github.com/coreos/fleet/pkg"
@@ -42,7 +56,9 @@ Open a shell on a machine and forward the authentication agent connection:
 
 Tip: Create an alias for --tunnel.
 	- Add "alias fleetctl=fleetctl --tunnel 10.10.10.10" to your bash profile.
-	- Now you can run all fleet commands locally.`,
+	- Now you can run all fleet commands locally.
+
+This command does not work with global units.`,
 		Run: runSSH,
 	}
 )
@@ -56,7 +72,7 @@ func init() {
 
 func runSSH(args []string) (exit int) {
 	if flagUnit != "" && flagMachine != "" {
-		fmt.Fprintln(os.Stderr, "Both machine and unit flags provided, please specify only one.")
+		stderr("Both machine and unit flags provided, please specify only one.")
 		return 1
 	}
 
@@ -65,36 +81,38 @@ func runSSH(args []string) (exit int) {
 
 	switch {
 	case flagMachine != "":
-		addr, _ = findAddressInMachineList(flagMachine)
+		addr, _, err = findAddressInMachineList(flagMachine)
 	case flagUnit != "":
-		addr, _ = findAddressInRunningUnits(flagUnit)
+		addr, _, err = findAddressInRunningUnits(flagUnit)
 	default:
 		addr, err = globalMachineLookup(args)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return 1
-		}
 		// trim machine/unit name from args
 		if len(args) > 0 {
 			args = args[1:]
 		}
 	}
 
+	if err != nil {
+		stderr("Unable to proceed: %v", err)
+		return 1
+	}
+
 	if addr == "" {
-		fmt.Fprintln(os.Stderr, "Requested machine could not be found.")
+		stderr("Could not determine address of machine.")
 		return 1
 	}
 
 	args = pkg.TrimToDashes(args)
 
 	var sshClient *ssh.SSHForwardingClient
+	timeout := getSSHTimeoutFlag()
 	if tun := getTunnelFlag(); tun != "" {
-		sshClient, err = ssh.NewTunnelledSSHClient("core", tun, addr, getChecker(), flagSSHAgentForwarding)
+		sshClient, err = ssh.NewTunnelledSSHClient("core", tun, addr, getChecker(), flagSSHAgentForwarding, timeout)
 	} else {
-		sshClient, err = ssh.NewSSHClient("core", addr, getChecker(), flagSSHAgentForwarding)
+		sshClient, err = ssh.NewSSHClient("core", addr, getChecker(), flagSSHAgentForwarding, timeout)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed building SSH client: %v\n", err)
+		stderr("Failed building SSH client: %v", err)
 		return 1
 	}
 
@@ -104,11 +122,11 @@ func runSSH(args []string) (exit int) {
 		cmd := strings.Join(args, " ")
 		err, exit = ssh.Execute(sshClient, cmd)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed running command over SSH: %v\n", err)
+			stderr("Failed running command over SSH: %v", err)
 		}
 	} else {
 		if err := ssh.Shell(sshClient); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed opening shell over SSH: %v\n", err)
+			stderr("Failed opening shell over SSH: %v", err)
 			exit = 1
 		}
 	}
@@ -122,8 +140,8 @@ func globalMachineLookup(args []string) (string, error) {
 
 	lookup := args[0]
 
-	machineAddr, machineOk := findAddressInMachineList(lookup)
-	unitAddr, unitOk := findAddressInRunningUnits(lookup)
+	machineAddr, machineOk, _ := findAddressInMachineList(lookup)
+	unitAddr, unitOk, _ := findAddressInRunningUnits(lookup)
 
 	switch {
 	case machineOk && unitOk:
@@ -134,49 +152,53 @@ func globalMachineLookup(args []string) (string, error) {
 		return unitAddr, nil
 	}
 
-	return "", nil
+	return "", fmt.Errorf("could not find matching unit or machine")
 }
 
-func findAddressInMachineList(lookup string) (string, bool) {
+func findAddressInMachineList(lookup string) (string, bool, error) {
 	states, err := cAPI.Machines()
 	if err != nil {
-		log.V(1).Infof("Unable to retrieve list of active machines from the Registry: %v", err)
-		return "", false
+		return "", false, err
 	}
 
 	var match *machine.MachineState
-
 	for i := range states {
 		machState := states[i]
 		if !strings.HasPrefix(machState.ID, lookup) {
 			continue
-		} else if match != nil {
-			fmt.Fprintln(os.Stderr, "Found more than one Machine, be more specific.")
-			os.Exit(1)
 		}
+
+		if match != nil {
+			return "", false, fmt.Errorf("found more than one machine")
+		}
+
 		match = &machState
 	}
 
 	if match == nil {
-		return "", false
+		return "", false, fmt.Errorf("machine does not exist")
 	}
-	return match.PublicIP, true
+
+	return match.PublicIP, true, nil
 }
 
-func findAddressInRunningUnits(jobName string) (string, bool) {
-	name := unitNameMangle(jobName)
-	j, err := cAPI.Job(name)
+func findAddressInRunningUnits(name string) (string, bool, error) {
+	name = unitNameMangle(name)
+	u, err := cAPI.Unit(name)
 	if err != nil {
-		log.V(1).Infof("Unable to retrieve Job(%s) from Repository: %v", name, err)
+		return "", false, err
+	} else if u == nil {
+		return "", false, fmt.Errorf("unit does not exist")
+	} else if suToGlobal(*u) {
+		return "", false, fmt.Errorf("global units unsupported")
 	}
-	if j == nil || j.UnitState == nil {
-		return "", false
-	}
-	m := cachedMachineState(j.UnitState.MachineID)
+
+	m := cachedMachineState(u.MachineID)
 	if m != nil && m.PublicIP != "" {
-		return m.PublicIP, true
+		return m.PublicIP, true, nil
 	}
-	return "", false
+
+	return "", false, nil
 }
 
 // runCommand will attempt to run a command on a given machine. It will attempt
@@ -186,16 +208,16 @@ func runCommand(cmd string, machID string) (retcode int) {
 	if machine.IsLocalMachineID(machID) {
 		err, retcode = runLocalCommand(cmd)
 		if err != nil {
-			fmt.Printf("Error running local command: %v\n", err)
+			stderr("Error running local command: %v", err)
 		}
 	} else {
 		ms, err := machineState(machID)
 		if err != nil || ms == nil {
-			fmt.Printf("Error getting machine IP: %v\n", err)
+			stderr("Error getting machine IP: %v", err)
 		} else {
 			err, retcode = runRemoteCommand(cmd, ms.PublicIP)
 			if err != nil {
-				fmt.Printf("Error running remote command: %v\n", err)
+				stderr("Error running remote command: %v", err)
 			}
 		}
 	}
@@ -227,10 +249,11 @@ func runLocalCommand(cmd string) (error, int) {
 // any error encountered and the exit status of the command
 func runRemoteCommand(cmd string, addr string) (err error, exit int) {
 	var sshClient *ssh.SSHForwardingClient
+	timeout := getSSHTimeoutFlag()
 	if tun := getTunnelFlag(); tun != "" {
-		sshClient, err = ssh.NewTunnelledSSHClient("core", tun, addr, getChecker(), false)
+		sshClient, err = ssh.NewTunnelledSSHClient("core", tun, addr, getChecker(), false, timeout)
 	} else {
-		sshClient, err = ssh.NewSSHClient("core", addr, getChecker(), false)
+		sshClient, err = ssh.NewSSHClient("core", addr, getChecker(), false, timeout)
 	}
 	if err != nil {
 		return err, -1

@@ -1,26 +1,49 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package api
 
 import (
 	"net/http"
 
-	log "github.com/coreos/fleet/Godeps/_workspace/src/github.com/golang/glog"
-
+	"github.com/coreos/fleet/client"
+	"github.com/coreos/fleet/log"
 	"github.com/coreos/fleet/registry"
+	"github.com/coreos/fleet/version"
 )
 
 func NewServeMux(reg registry.Registry) http.Handler {
 	sm := http.NewServeMux()
+	cAPI := &client.RegistryClient{Registry: reg}
 
-	prefix := "/v1-alpha"
-	wireUpMachinesResource(sm, prefix, reg)
-	wireUpUnitsResource(sm, prefix, reg)
-	sm.HandleFunc(prefix, methodNotAllowedHandler)
+	for _, prefix := range []string{"/v1-alpha", "/fleet/v1"} {
+		wireUpDiscoveryResource(sm, prefix)
+		wireUpMachinesResource(sm, prefix, cAPI)
+		wireUpStateResource(sm, prefix, cAPI)
+		wireUpUnitsResource(sm, prefix, cAPI)
+		sm.HandleFunc(prefix, methodNotAllowedHandler)
+	}
 
 	sm.HandleFunc("/", baseHandler)
 
-	lm := &loggingMiddleware{sm}
+	hdlr := http.Handler(sm)
+	hdlr = &loggingMiddleware{hdlr}
+	hdlr = &serverInfoMiddleware{hdlr}
 
-	return lm
+	return hdlr
 }
 
 type loggingMiddleware struct {
@@ -30,6 +53,15 @@ type loggingMiddleware struct {
 func (lm *loggingMiddleware) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	log.V(1).Infof("HTTP %s %v", req.Method, req.URL)
 	lm.next.ServeHTTP(rw, req)
+}
+
+type serverInfoMiddleware struct {
+	next http.Handler
+}
+
+func (si *serverInfoMiddleware) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	rw.Header().Set("Server", "fleetd/"+version.Version)
+	si.next.ServeHTTP(rw, req)
 }
 
 func methodNotAllowedHandler(rw http.ResponseWriter, req *http.Request) {

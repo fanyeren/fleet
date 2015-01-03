@@ -1,3 +1,19 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package machine
 
 import (
@@ -10,7 +26,8 @@ import (
 	"time"
 
 	"github.com/coreos/fleet/Godeps/_workspace/src/github.com/docker/libcontainer/netlink"
-	log "github.com/coreos/fleet/Godeps/_workspace/src/github.com/golang/glog"
+
+	"github.com/coreos/fleet/log"
 	"github.com/coreos/fleet/unit"
 )
 
@@ -92,22 +109,10 @@ func (m *CoreOSMachine) currentState() *MachineState {
 		return nil
 	}
 	publicIP := getLocalIP()
-	totalResources, err := readLocalResources()
-	if err != nil {
-		log.Errorf("Error retrieving local resources: %v\n", err)
-		return nil
-	}
-	units, err := m.um.Units()
-	if err != nil {
-		log.Errorf("Error retrieving local units: %v\n", err)
-		return nil
-	}
 	return &MachineState{
-		ID:             id,
-		PublicIP:       publicIP,
-		Metadata:       make(map[string]string, 0),
-		TotalResources: totalResources,
-		LoadedUnits:    len(units),
+		ID:       id,
+		PublicIP: publicIP,
+		Metadata: make(map[string]string, 0),
 	}
 }
 
@@ -130,27 +135,38 @@ func readLocalMachineID(root string) (string, error) {
 	return mID, nil
 }
 
-func getLocalIP() string {
+func getLocalIP() (got string) {
 	iface := getDefaultGatewayIface()
 	if iface == nil {
-		return ""
+		return
 	}
 
 	addrs, err := iface.Addrs()
 	if err != nil || len(addrs) == 0 {
-		return ""
+		return
 	}
 
 	for _, addr := range addrs {
 		// Attempt to parse the address in CIDR notation
-		// and assert it is IPv4
+		// and assert that it is IPv4 and global unicast
 		ip, _, err := net.ParseCIDR(addr.String())
-		if err == nil && ip.To4() != nil {
-			return ip.String()
+		if err != nil {
+			continue
 		}
+
+		if !usableAddress(ip) {
+			continue
+		}
+
+		got = ip.String()
+		break
 	}
 
-	return ""
+	return
+}
+
+func usableAddress(ip net.IP) bool {
+	return ip.To4() != nil && ip.IsGlobalUnicast()
 }
 
 func getDefaultGatewayIface() *net.Interface {

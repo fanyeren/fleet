@@ -1,3 +1,19 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package main
 
 import (
@@ -5,7 +21,6 @@ import (
 
 	"github.com/coreos/fleet/machine"
 	"github.com/coreos/fleet/registry"
-	"github.com/coreos/fleet/resource"
 )
 
 func newTestRegistryForListMachines() registry.Registry {
@@ -29,14 +44,12 @@ func TestListMachinesFieldsToStrings(t *testing.T) {
 		"ping": "pong",
 	}
 	ver := "v9.9.9"
-	res := resource.ResourceTuple{10, 1024, 1024}
 
 	ms := &machine.MachineState{
-		ID:             id,
-		PublicIP:       ip,
-		Metadata:       metadata,
-		Version:        ver,
-		TotalResources: res,
+		ID:       id,
+		PublicIP: ip,
+		Metadata: metadata,
+		Version:  ver,
 	}
 
 	val := listMachinesFields["machine"](ms, false)
@@ -57,14 +70,12 @@ func TestListMachinesFieldsEmpty(t *testing.T) {
 	ip := ""
 	metadata := map[string]string{}
 	ver := "v9.9.9"
-	res := resource.ResourceTuple{10, 1024, 1024}
 
 	ms := &machine.MachineState{
-		ID:             id,
-		PublicIP:       ip,
-		Metadata:       metadata,
-		Version:        ver,
-		TotalResources: res,
+		ID:       id,
+		PublicIP: ip,
+		Metadata: metadata,
+		Version:  ver,
 	}
 
 	for _, tt := range []string{"ip", "metadata"} {

@@ -1,3 +1,19 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package platform
 
 import (
@@ -19,27 +35,58 @@ import (
 	"github.com/coreos/fleet/functional/util"
 )
 
-var fleetBinPath string
+const (
+	fleetAPIPort = 54728
+)
+
+var fleetdBinPath string
 
 func init() {
-	fleetBinPath = os.Getenv("FLEET_BIN")
-	if fleetBinPath == "" {
-		fmt.Println("FLEET_BIN environment variable must be set")
+	fleetdBinPath = os.Getenv("FLEETD_BIN")
+	if fleetdBinPath == "" {
+		fmt.Println("FLEETD_BIN environment variable must be set")
 		os.Exit(1)
-	} else if _, err := os.Stat(fleetBinPath); err != nil {
+	} else if _, err := os.Stat(fleetdBinPath); err != nil {
 		fmt.Printf("%v\n", err)
+		os.Exit(1)
+	}
+	// sanity check etcd availability
+	cmd := exec.Command("etcdctl", "ls")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		fmt.Printf("Unable to access etcd: %v\n", err)
+		fmt.Println(string(out))
 		os.Exit(1)
 	}
 }
 
-type member struct {
+type nspawnMember struct {
+	id  string
 	ip  string
 	pid int
 }
 
+func (m *nspawnMember) ID() string {
+	return string(m.id)
+}
+
+func (m *nspawnMember) IP() string {
+	return m.ip
+}
+
+func (m *nspawnMember) Endpoint() string {
+	return fmt.Sprintf("http://%s:%d", m.ip, fleetAPIPort)
+}
+
 type nspawnCluster struct {
 	name    string
-	members map[string]*member
+	maxID   int
+	members map[string]nspawnMember
+}
+
+func (nc *nspawnCluster) nextID() string {
+	nc.maxID++
+	return strconv.Itoa(nc.maxID)
 }
 
 func (nc *nspawnCluster) keyspace() string {
@@ -47,22 +94,92 @@ func (nc *nspawnCluster) keyspace() string {
 	return fmt.Sprintf("/fleet_functional/%s", nc.name)
 }
 
-func (nc *nspawnCluster) Fleetctl(args ...string) (string, string, error) {
-	args = append([]string{"--etcd-key-prefix=" + nc.keyspace()}, args...)
+func (nc *nspawnCluster) Fleetctl(m Member, args ...string) (string, string, error) {
+	args = append([]string{"--experimental-api", "--endpoint=" + m.Endpoint()}, args...)
 	return util.RunFleetctl(args...)
 }
 
-func (nc *nspawnCluster) FleetctlWithInput(input string, args ...string) (string, string, error) {
-	args = append([]string{"--etcd-key-prefix=" + nc.keyspace()}, args...)
+func (nc *nspawnCluster) FleetctlWithInput(m Member, input string, args ...string) (string, string, error) {
+	args = append([]string{"--experimental-api", "--endpoint=" + m.Endpoint()}, args...)
 	return util.RunFleetctlWithInput(input, args...)
 }
 
-func (nc *nspawnCluster) WaitForNMachines(count int) ([]string, error) {
-	return util.WaitForNMachines(nc.Fleetctl, count)
+func (nc *nspawnCluster) WaitForNActiveUnits(m Member, count int) (map[string][]util.UnitState, error) {
+	var nactive int
+	states := make(map[string][]util.UnitState)
+
+	timeout := 15 * time.Second
+	alarm := time.After(timeout)
+
+	ticker := time.Tick(250 * time.Millisecond)
+loop:
+	for {
+		select {
+		case <-alarm:
+			return nil, fmt.Errorf("failed to find %d active units within %v (last found: %d)", count, timeout, nactive)
+		case <-ticker:
+			stdout, _, err := nc.Fleetctl(m, "list-units", "--no-legend", "--full", "--fields", "unit,active,machine")
+			stdout = strings.TrimSpace(stdout)
+			if err != nil {
+				continue
+			}
+
+			lines := strings.Split(stdout, "\n")
+			allStates := util.ParseUnitStates(lines)
+			active := util.FilterActiveUnits(allStates)
+			nactive = len(active)
+			if nactive != count {
+				continue
+			}
+
+			for _, state := range active {
+				name := state.Name
+				if _, ok := states[name]; !ok {
+					states[name] = []util.UnitState{}
+				}
+				states[name] = append(states[name], state)
+			}
+			break loop
+		}
+	}
+
+	return states, nil
 }
 
-func (nc *nspawnCluster) WaitForNActiveUnits(count int) (map[string]util.UnitState, error) {
-	return util.WaitForNActiveUnits(nc.Fleetctl, count)
+func (nc *nspawnCluster) WaitForNMachines(m Member, count int) ([]string, error) {
+	var machines []string
+	timeout := 10 * time.Second
+	alarm := time.After(timeout)
+
+	ticker := time.Tick(250 * time.Millisecond)
+loop:
+	for {
+		select {
+		case <-alarm:
+			return machines, fmt.Errorf("failed to find %d machines within %v", count, timeout)
+		case <-ticker:
+			stdout, _, err := nc.Fleetctl(m, "list-machines", "--no-legend", "--full", "--fields", "machine")
+			if err != nil {
+				continue
+			}
+
+			stdout = strings.TrimSpace(stdout)
+
+			found := 0
+			if stdout != "" {
+				machines = strings.Split(stdout, "\n")
+				found = len(machines)
+			}
+
+			if found != count {
+				continue
+			}
+
+			break loop
+		}
+	}
+
+	return machines, nil
 }
 
 func (nc *nspawnCluster) prepCluster() (err error) {
@@ -111,7 +228,7 @@ func (nc *nspawnCluster) prepCluster() (err error) {
 	return nil
 }
 
-func (nc *nspawnCluster) prepFleet(dir, ip, sshKeySrc, fleetBinSrc string, cfg MachineConfig) error {
+func (nc *nspawnCluster) prepFleet(dir, ip, sshKeySrc, fleetdBinSrc string) error {
 	cmd := fmt.Sprintf("mkdir -p %s/opt/fleet", dir)
 	if _, _, err := run(cmd); err != nil {
 		return err
@@ -123,8 +240,8 @@ func (nc *nspawnCluster) prepFleet(dir, ip, sshKeySrc, fleetBinSrc string, cfg M
 		return err
 	}
 
-	fleetBinDst := path.Join(dir, "opt", "fleet", "fleet")
-	if err := copyFile(fleetBinSrc, fleetBinDst, 0755); err != nil {
+	fleetdBinDst := path.Join(dir, "opt", "fleet", "fleetd")
+	if err := copyFile(fleetdBinSrc, fleetdBinDst, 0755); err != nil {
 		return err
 	}
 
@@ -132,37 +249,42 @@ func (nc *nspawnCluster) prepFleet(dir, ip, sshKeySrc, fleetBinSrc string, cfg M
 etcd_servers=["http://172.17.0.1:4001"]	
 etcd_key_prefix=%s
 public_ip=%s
-verify_units=%s
 authorized_keys_file=%s
 `
-	cfgContents := fmt.Sprintf(cfgTmpl, nc.keyspace(), ip, strconv.FormatBool(cfg.VerifyUnits), relSSHKeyDst)
+	cfgContents := fmt.Sprintf(cfgTmpl, nc.keyspace(), ip, relSSHKeyDst)
 	cfgPath := path.Join(dir, "opt", "fleet", "fleet.conf")
 	if err := ioutil.WriteFile(cfgPath, []byte(cfgContents), 0644); err != nil {
 		return err
 	}
 
-	unitContents := `[Service]
-ExecStart=/opt/fleet/fleet -config /opt/fleet/fleet.conf
+	socketContents := fmt.Sprintf("[Socket]\nListenStream=%d\n", fleetAPIPort)
+	socketPath := path.Join(dir, "opt", "fleet", "fleet.socket")
+	if err := ioutil.WriteFile(socketPath, []byte(socketContents), 0644); err != nil {
+		return err
+	}
+
+	serviceContents := `[Service]
+ExecStart=/opt/fleet/fleetd -config /opt/fleet/fleet.conf
 `
-	unitPath := path.Join(dir, "opt", "fleet", "fleet.service")
-	if err := ioutil.WriteFile(unitPath, []byte(unitContents), 0644); err != nil {
+	servicePath := path.Join(dir, "opt", "fleet", "fleet.service")
+	if err := ioutil.WriteFile(servicePath, []byte(serviceContents), 0644); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (nc *nspawnCluster) Members() []string {
-	names := make([]string, 0)
-	for member := range nc.members {
-		names = append(names, member)
+func (nc *nspawnCluster) Members() []Member {
+	ms := make([]Member, 0)
+	for _, nm := range nc.members {
+		nm := nm
+		ms = append(ms, Member(&nm))
 	}
-	return names
+	return ms
 }
 
-func (nc *nspawnCluster) MemberCommand(member string, args ...string) (string, error) {
-	ip := nc.members[member].ip
-	baseArgs := []string{"-o", "UserKnownHostsFile=/dev/null", "-o", "StrictHostKeyChecking=no", fmt.Sprintf("core@%s", ip)}
+func (nc *nspawnCluster) MemberCommand(m Member, args ...string) (string, error) {
+	baseArgs := []string{"-o", "UserKnownHostsFile=/dev/null", "-o", "StrictHostKeyChecking=no", fmt.Sprintf("core@%s", m.IP())}
 	args = append(baseArgs, args...)
 	log.Printf("ssh %s", strings.Join(args, " "))
 	var stdoutBytes bytes.Buffer
@@ -172,31 +294,21 @@ func (nc *nspawnCluster) MemberCommand(member string, args ...string) (string, e
 	return stdoutBytes.String(), err
 }
 
-func (nc *nspawnCluster) findUsableIP() (string, error) {
-	base := 100
-ip:
-	for octet := base; octet < 256; octet++ {
-		ip := fmt.Sprintf("172.17.1.%d", octet)
-		for _, member := range nc.members {
-			if ip == member.ip {
-				continue ip
-			}
-		}
-		return ip, nil
-	}
-	return "", errors.New("unable to find unused IP address")
+func (nc *nspawnCluster) CreateMember() (m Member, err error) {
+	id := nc.nextID()
+	log.Printf("Creating nspawn machine %d in cluster %s", id, nc.name)
+	return nc.createMember(id)
 }
 
-func (nc *nspawnCluster) CreateMember(name string, cfg MachineConfig) (err error) {
-	log.Printf("Creating nspawn machine %s in cluster %s", name, nc.name)
-	ip, err := nc.findUsableIP()
-	if err != nil {
-		return err
+func (nc *nspawnCluster) createMember(id string) (m Member, err error) {
+	nm := nspawnMember{
+		id: id,
+		ip: fmt.Sprintf("172.17.1.%s", id),
 	}
-	nc.members[name] = &member{ip: ip}
+	nc.members[id] = nm
 
 	basedir := path.Join(os.TempDir(), nc.name)
-	fsdir := path.Join(basedir, name, "fs")
+	fsdir := path.Join(basedir, nm.ID(), "fs")
 	cmds := []string{
 		// set up directory for fleet service
 		fmt.Sprintf("mkdir -p %s/etc/systemd/system", fsdir),
@@ -212,8 +324,8 @@ func (nc *nspawnCluster) CreateMember(name string, cfg MachineConfig) (err error
 		fmt.Sprintf("mkdir -p %s/home/core", fsdir),
 		fmt.Sprintf("chown core:core %s/home/core", fsdir),
 
-		// set up directory for machine-id (see below)
-		fmt.Sprintf("mkdir -p %s/var/lib/dbus", fsdir),
+		// We don't need this, and it's slow, so mask it
+		fmt.Sprintf("ln -s /dev/null %s/etc/systemd/system/systemd-udev-hwdb-update.service", fsdir),
 
 		// set up directory for sshd_config (see below)
 		fmt.Sprintf("mkdir -p %s/etc/ssh", fsdir),
@@ -228,15 +340,6 @@ func (nc *nspawnCluster) CreateMember(name string, cfg MachineConfig) (err error
 		}
 	}
 
-	// Write machine-id manually to override systemd picking up the host OS's machine-id in the case of the host being a KVM
-	// (otherwise all smoke machines will have the same machine-id, causing havoc)
-	// TODO(jonboulle): this should be fixed upstream in fdd25311706bd32580ec4d43211cdf4665d2f9de; remove once newer systemd is deployed
-	uuid := fmt.Sprintf("0000000000000000000000000000000%s\n", name)
-	if err = ioutil.WriteFile(path.Join(fsdir, "/var/lib/dbus/machine-id"), []byte(uuid), 0755); err != nil {
-		log.Printf("Failed writing machine-id: %v", err)
-		return
-	}
-
 	sshd_config := `# Use most defaults for sshd configuration.
 UsePrivilegeSeparation sandbox
 Subsystem sftp internal-sftp
@@ -248,9 +351,23 @@ UseDNS no
 		return
 	}
 
+	// For expediency, generate the minimal viable SSH keys for the host, instead of the default set
+	sshd_keygen := `[Unit]
+	Description=Generate sshd host keys
+	Before=sshd.service
+
+	[Service]
+	Type=oneshot
+	RemainAfterExit=yes
+	ExecStart=/usr/bin/ssh-keygen -t rsa -f /etc/ssh/ssh_host_rsa_key -N "" -b 768`
+	if err = ioutil.WriteFile(path.Join(fsdir, "/etc/systemd/system/sshd-keygen.service"), []byte(sshd_keygen), 0644); err != nil {
+		log.Printf("Failed writing sshd-keygen.service: %v", err)
+		return
+	}
+
 	sshKeySrc := path.Join("fixtures", "id_rsa.pub")
-	if err = nc.prepFleet(fsdir, ip, sshKeySrc, fleetBinPath, cfg); err != nil {
-		log.Printf("Failed preparing fleet in filesystem: %v", err)
+	if err = nc.prepFleet(fsdir, nm.IP(), sshKeySrc, fleetdBinPath); err != nil {
+		log.Printf("Failed preparing fleetd in filesystem: %v", err)
 		return
 	}
 
@@ -258,22 +375,22 @@ UseDNS no
 		"/usr/bin/systemd-nspawn",
 		"--bind-ro=/usr",
 		"-b",
-		fmt.Sprintf("-M %s%s", nc.name, name),
+		fmt.Sprintf("-M %s%s", nc.name, nm.ID()),
 		"--capability=CAP_NET_BIND_SERVICE,CAP_SYS_TIME", // needed for ntpd
 		"--network-bridge fleet0",
 		fmt.Sprintf("-D %s", fsdir),
 	}, " ")
 	log.Printf("Creating nspawn container: %s", exec)
-	err = nc.systemd(fmt.Sprintf("%s%s.service", nc.name, name), exec)
+	err = nc.systemd(fmt.Sprintf("%s%s.service", nc.name, nm.ID()), exec)
 	if err != nil {
 		log.Printf("Failed creating nspawn container: %v", err)
 		return
 	}
 
-	pid, err := nc.machinePID(name)
+	nm.pid, err = nc.machinePID(nm.ID())
 	if err != nil {
-		log.Printf("Failed detecting machine %s%s PID: %v", nc.name, name, err)
-		return err
+		log.Printf("Failed detecting machine %s%s PID: %v", nc.name, nm.ID(), err)
+		return
 	}
 
 	alarm := time.After(10 * time.Second)
@@ -285,50 +402,53 @@ UseDNS no
 		default:
 		}
 		// TODO(jonboulle): probably a cleaner way to check here
-		if _, _, e := nc.nsenter(pid, "systemd-analyze"); e == nil {
+		if _, _, e := nc.nsenter(nm.pid, "systemd-analyze"); e == nil {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 
 	}
 
-	nc.members[name].pid = pid
-
 	var stderr string
-
-	cmd := fmt.Sprintf("ip addr add %s/16 dev host0", ip)
-	_, stderr, err = nc.nsenter(pid, cmd)
+	cmd := fmt.Sprintf("ip addr add %s/16 dev host0", nm.IP())
+	_, stderr, err = nc.nsenter(nm.pid, cmd)
 	if err != nil {
 		log.Printf("Failed adding IP address to container: %s", stderr)
 		return
 	}
 
 	cmd = fmt.Sprintf("update-ssh-keys -u core -a fleet /opt/fleet/id_rsa.pub")
-	_, _, err = nc.nsenter(pid, cmd)
+	_, _, err = nc.nsenter(nm.pid, cmd)
 	if err != nil {
 		log.Printf("Failed authorizing SSH key in container")
 		return
 	}
 
-	_, _, err = nc.nsenter(pid, "ln -s /opt/fleet/fleet.service /etc/systemd/system/fleet.service")
+	_, _, err = nc.nsenter(nm.pid, "ln -s /opt/fleet/fleet.socket /etc/systemd/system/fleet.socket")
+	if err != nil {
+		log.Printf("Failed symlinking fleet.socket: %v", err)
+		return
+	}
+
+	_, _, err = nc.nsenter(nm.pid, "ln -s /opt/fleet/fleet.service /etc/systemd/system/fleet.service")
 	if err != nil {
 		log.Printf("Failed symlinking fleet.service: %v", err)
 		return
 	}
 
-	_, _, err = nc.nsenter(pid, "systemctl start fleet.service")
+	_, _, err = nc.nsenter(nm.pid, "systemctl start fleet.socket fleet.service")
 	if err != nil {
-		log.Printf("Failed starting fleet.service: %v", err)
+		log.Printf("Failed starting fleet units: %v", err)
 		return
 	}
 
-	return nil
+	return Member(&nm), nil
 }
 
 func (nc *nspawnCluster) Destroy() error {
-	for name := range nc.members {
-		log.Printf("Destroying nspawn machine %s", name)
-		nc.DestroyMember(name)
+	for _, m := range nc.Members() {
+		log.Printf("Destroying nspawn machine %s", m.ID())
+		nc.DestroyMember(m)
 	}
 
 	dir := path.Join(os.TempDir(), nc.name)
@@ -346,21 +466,47 @@ func (nc *nspawnCluster) Destroy() error {
 	return nil
 }
 
-func (nc *nspawnCluster) PoweroffMember(name string) (err error) {
-	label := fmt.Sprintf("%s%s", nc.name, name)
+func (nc *nspawnCluster) ReplaceMember(m Member) (Member, error) {
+	count := len(nc.members)
+	label := fmt.Sprintf("%s%s", nc.name, m.ID())
+
 	// The `machinectl poweroff` command does not cleanly shut down
 	// the nspawn container, so we must use systemctl
 	cmd := fmt.Sprintf("systemctl -M %s poweroff", label)
-	_, _, err = run(cmd)
-	if err != nil {
-		log.Printf("Command '%s' failed: %v", cmd, err)
+	if _, stderr, _ := run(cmd); !strings.Contains(stderr, "Success") {
+		return nil, errors.New("poweroff failed")
 	}
-	return
+
+	var nm nspawnMember
+	if m.ID() == "1" {
+		nm = nc.members["2"]
+	} else {
+		nm = nc.members["1"]
+	}
+	mN := Member(&nm)
+
+	if _, err := nc.WaitForNMachines(mN, count-1); err != nil {
+		return nil, err
+	}
+	if err := nc.DestroyMember(m); err != nil {
+		return nil, err
+	}
+
+	m, err := nc.createMember(m.ID())
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := nc.WaitForNMachines(mN, count); err != nil {
+		return nil, err
+	}
+
+	return m, nil
 }
 
-func (nc *nspawnCluster) DestroyMember(name string) error {
-	dir := path.Join(os.TempDir(), nc.name, name)
-	label := fmt.Sprintf("%s%s", nc.name, name)
+func (nc *nspawnCluster) DestroyMember(m Member) error {
+	dir := path.Join(os.TempDir(), nc.name, m.ID())
+	label := fmt.Sprintf("%s%s", nc.name, m.ID())
 	cmds := []string{
 		fmt.Sprintf("machinectl terminate %s", label),
 		fmt.Sprintf("rm -f /run/systemd/system/machine-%s.scope", label),
@@ -384,7 +530,7 @@ func (nc *nspawnCluster) DestroyMember(name string) error {
 		log.Printf("Failed systemd daemon-reload: %v", err)
 	}
 
-	delete(nc.members, name)
+	delete(nc.members, m.ID())
 
 	return nil
 }
@@ -410,17 +556,22 @@ func (nc *nspawnCluster) systemd(unitName, exec string) error {
 
 	log.Printf("Creating transient systemd unit %s", unitName)
 
-	if _, err = conn.StartTransientUnit(unitName, "replace", props...); err != nil {
+	res1 := make(chan string)
+	if _, err = conn.StartTransientUnit(unitName, "replace", props, res1); err != nil {
 		log.Printf("Failed creating transient unit %s: %v", unitName, err)
 		return err
 	}
+	<-res1
 
-	_, err = conn.StartUnit(unitName, "replace")
+	res2 := make(chan string)
+	_, err = conn.StartUnit(unitName, "replace", res2)
 	if err != nil {
 		log.Printf("Failed starting transient unit %s: %v", unitName, err)
+		return err
 	}
 
-	return err
+	<-res2
+	return nil
 }
 
 // wait up to 10s for a machine to be started
@@ -448,7 +599,7 @@ func (nc *nspawnCluster) nsenter(pid int, cmd string) (string, string, error) {
 }
 
 func NewNspawnCluster(name string) (Cluster, error) {
-	nc := &nspawnCluster{name, map[string]*member{}}
+	nc := &nspawnCluster{name: name, members: map[string]nspawnMember{}}
 	err := nc.prepCluster()
 	return nc, err
 }

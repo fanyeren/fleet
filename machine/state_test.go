@@ -1,11 +1,22 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package machine
 
-import (
-	"reflect"
-	"testing"
-
-	"github.com/coreos/fleet/resource"
-)
+import "testing"
 
 func TestStackState(t *testing.T) {
 	top := MachineState{
@@ -81,9 +92,6 @@ var shortIDTests = []struct {
 			"5.6.7.8",
 			map[string]string{"foo": "bar"},
 			"",
-			resource.ResourceTuple{},
-			resource.ResourceTuple{},
-			0,
 		},
 		s: "595989bb",
 		l: "595989bb-cbb7-49ce-8726-722d6e157b4e",
@@ -125,71 +133,6 @@ func TestStateMatchID(t *testing.T) {
 
 		if ok := tt.m.MatchID(tt.s); !ok {
 			t.Errorf("#%d: expected %v", i, true)
-		}
-	}
-}
-
-func TestStackResources(t *testing.T) {
-	mach := CoreOSMachine{
-		staticState: MachineState{
-			TotalResources: resource.ResourceTuple{
-				Cores:  0,
-				Memory: 3000,
-				Disk:   4000,
-			},
-		},
-		dynamicState: &MachineState{
-			TotalResources: resource.ResourceTuple{
-				Cores:  200,
-				Memory: 512,
-				Disk:   1024,
-			},
-		},
-	}
-
-	state := mach.State()
-
-	if state.TotalResources.Cores != 200 {
-		t.Fatalf("Incorrect total resources cores %d, expected 200", state.TotalResources.Cores)
-	}
-
-	if state.TotalResources.Memory != 3000 {
-		t.Fatalf("Incorrect total resources memory %d, expected 3000", state.TotalResources.Memory)
-	}
-
-	if state.TotalResources.Disk != 4000 {
-		t.Fatalf("Incorrect total resources disk %d, expected 4000", state.TotalResources.Disk)
-	}
-}
-
-func TestUpdateFreeResources(t *testing.T) {
-	r := func(cpu, mem, disk int) resource.ResourceTuple {
-		return resource.ResourceTuple{cpu, mem, disk}
-	}
-	for i, tt := range []struct {
-		total resource.ResourceTuple
-		res   map[string]resource.ResourceTuple
-		free  resource.ResourceTuple // before accounting for resource.HostResources
-	}{
-		{
-			resource.ResourceTuple{},
-			nil,
-			resource.ResourceTuple{},
-		},
-		{
-			r(1000, 4096, 1024),
-			map[string]resource.ResourceTuple{"job1.service": r(750, 3072, 768)},
-			r(250, 1024, 256),
-		},
-	} {
-		ms := MachineState{TotalResources: tt.total}
-		got := UpdateFreeResources(ms, tt.res)
-		want := MachineState{
-			TotalResources: tt.total,
-			FreeResources:  resource.Sub(tt.free, resource.HostResources),
-		}
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("case %d: got %v, want %v", i, got, want)
 		}
 	}
 }

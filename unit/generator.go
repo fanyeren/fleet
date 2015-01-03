@@ -1,10 +1,26 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package unit
 
 import (
+	"encoding/json"
 	"time"
 
-	log "github.com/coreos/fleet/Godeps/_workspace/src/github.com/golang/glog"
-
+	"github.com/coreos/fleet/log"
 	"github.com/coreos/fleet/pkg"
 )
 
@@ -25,6 +41,16 @@ type UnitStateGenerator struct {
 
 	subscribed     pkg.Set
 	lastSubscribed pkg.Set
+}
+
+func (g *UnitStateGenerator) MarshalJSON() ([]byte, error) {
+	data := struct {
+		Subscribed []string
+	}{
+		Subscribed: g.subscribed.Values(),
+	}
+
+	return json.Marshal(data)
 }
 
 // Run periodically calls Generate and sends received *UnitStateHeartbeat
@@ -52,7 +78,14 @@ func (g *UnitStateGenerator) Run(receiver chan<- *UnitStateHeartbeat, stop chan 
 // Generate returns and fills a channel with *UnitStateHeartbeat objects. Objects will
 // only be returned for units to which this generator is currently subscribed.
 func (g *UnitStateGenerator) Generate() (<-chan *UnitStateHeartbeat, error) {
+	var lastSubscribed pkg.Set
+	if g.lastSubscribed != nil {
+		lastSubscribed = g.lastSubscribed.Copy()
+	}
+
 	subscribed := g.subscribed.Copy()
+	g.lastSubscribed = subscribed
+
 	reportable, err := g.mgr.GetUnitStates(subscribed)
 	if err != nil {
 		return nil, err
@@ -68,18 +101,17 @@ func (g *UnitStateGenerator) Generate() (<-chan *UnitStateHeartbeat, error) {
 			}
 		}
 
-		if g.lastSubscribed != nil {
+		if lastSubscribed != nil {
 			// For all units that were part of the subscription list
 			// last time Generate ran, but are now not part of that
 			// list, send nil-State heartbeats to signal removal
-			for _, name := range g.lastSubscribed.Sub(subscribed).Values() {
+			for _, name := range lastSubscribed.Sub(subscribed).Values() {
 				beatchan <- &UnitStateHeartbeat{
 					Name: name,
 				}
 			}
 		}
 
-		g.lastSubscribed = subscribed
 		close(beatchan)
 	}()
 

@@ -1,3 +1,19 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package api
 
 import (
@@ -7,7 +23,7 @@ import (
 	"net/http"
 	"strings"
 
-	log "github.com/coreos/fleet/Godeps/_workspace/src/github.com/golang/glog"
+	"github.com/coreos/fleet/log"
 )
 
 func validateContentType(req *http.Request) error {
@@ -46,7 +62,7 @@ func sendResponse(rw http.ResponseWriter, code int, resp interface{}) {
 	}
 }
 
-// errorEntity is a fork of "code.google.com/p/google-api-go-client/googleapi".Error
+// errorEntity is a fork of "google.golang.org/api/googleapi".Error
 type errorEntity struct {
 	// Code is the HTTP response status code and will always be populated.
 	Code int `json:"code"`

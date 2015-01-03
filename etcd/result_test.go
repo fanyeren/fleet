@@ -1,3 +1,19 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package etcd
 
 import (
@@ -6,6 +22,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestUnmarshalSuccessfulResponseNoNodes(t *testing.T) {
@@ -35,9 +52,9 @@ func TestUnmarshalSuccessfulResponseNoNodes(t *testing.T) {
 		// Node
 		{
 			http.Response{
-				Body: ioutil.NopCloser(strings.NewReader(`{"action":"get", "node": {"key": "/foo", "value": "bar", "modifiedIndex": 12, "createdIndex": 10}}`)),
+				Body: ioutil.NopCloser(strings.NewReader(`{"action":"get", "node": {"key": "/foo", "value": "bar", "modifiedIndex": 12, "createdIndex": 10, "ttl": 3}}`)),
 			},
-			&Result{Action: "get", Node: &Node{Key: "/foo", Value: "bar", ModifiedIndex: 12, CreatedIndex: 10}},
+			&Result{Action: "get", Node: &Node{Key: "/foo", Value: "bar", ModifiedIndex: 12, CreatedIndex: 10, TTL: 3}},
 			false,
 		},
 
@@ -78,7 +95,7 @@ func TestUnmarshalSuccessfulResponseNoNodes(t *testing.T) {
 			t.Errorf("case %d: received res==%v, but expected res==%v", i, res, tt.res)
 			continue
 		} else if tt.res == nil {
-			// expected and succesfully got nil response
+			// expected and successfully got nil response
 			continue
 		}
 
@@ -88,6 +105,26 @@ func TestUnmarshalSuccessfulResponseNoNodes(t *testing.T) {
 
 		if !reflect.DeepEqual(res.Node, tt.res.Node) {
 			t.Errorf("case %d: Node=%v, expected %v", i, res.Node, tt.res.Node)
+		}
+	}
+}
+
+func TestNodeTTLDuration(t *testing.T) {
+	tests := []struct {
+		ttl  int
+		want time.Duration
+	}{
+		{3, 3 * time.Second},
+		{0, 0 * time.Second},
+		{-21, 0 * time.Second},
+	}
+
+	for i, tt := range tests {
+		n := &Node{TTL: tt.ttl}
+		got := n.TTLDuration()
+
+		if !reflect.DeepEqual(tt.want, got) {
+			t.Errorf("%d: TTLDuration() returned incorrect value: want=%v, got=%v", i, tt.want, got)
 		}
 	}
 }

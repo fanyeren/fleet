@@ -1,8 +1,25 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package main
 
 import (
 	"testing"
 
+	"github.com/coreos/fleet/client"
 	"github.com/coreos/fleet/job"
 	"github.com/coreos/fleet/machine"
 	"github.com/coreos/fleet/registry"
@@ -17,7 +34,7 @@ func newMachineState(id, ip string, md map[string]string) machine.MachineState {
 	}
 }
 
-func newFakeRegistryForSsh() registry.Registry {
+func newFakeRegistryForSsh() client.API {
 	// clear machineStates for every invocation
 	machineStates = nil
 	machines := []machine.MachineState{
@@ -27,15 +44,33 @@ func newFakeRegistryForSsh() registry.Registry {
 	}
 
 	jobs := []job.Job{
-		*job.NewJob("j1.service", unit.Unit{}),
-		*job.NewJob("j2.service", unit.Unit{}),
-		*job.NewJob("hello.service", unit.Unit{}),
+		job.Job{Name: "j1.service", Unit: unit.UnitFile{}, TargetMachineID: machines[0].ID},
+		job.Job{Name: "j2.service", Unit: unit.UnitFile{}, TargetMachineID: machines[1].ID},
+		job.Job{Name: "hello.service", Unit: unit.UnitFile{}, TargetMachineID: machines[2].ID},
 	}
 
-	states := map[string]*unit.UnitState{
-		"j1.service":    unit.NewUnitState("loaded", "active", "listening", machines[0].ID),
-		"j2.service":    unit.NewUnitState("loaded", "inactive", "dead", machines[1].ID),
-		"hello.service": unit.NewUnitState("loaded", "inactive", "dead", machines[2].ID),
+	states := []unit.UnitState{
+		unit.UnitState{
+			UnitName:    "j1.service",
+			LoadState:   "loaded",
+			ActiveState: "active",
+			SubState:    "listening",
+			MachineID:   machines[0].ID,
+		},
+		unit.UnitState{
+			UnitName:    "j2.service",
+			LoadState:   "loaded",
+			ActiveState: "inactive",
+			SubState:    "dead",
+			MachineID:   machines[1].ID,
+		},
+		unit.UnitState{
+			UnitName:    "hello.service",
+			LoadState:   "loaded",
+			ActiveState: "inactive",
+			SubState:    "dead",
+			MachineID:   machines[2].ID,
+		},
 	}
 
 	reg := registry.NewFakeRegistry()
@@ -43,13 +78,13 @@ func newFakeRegistryForSsh() registry.Registry {
 	reg.SetUnitStates(states)
 	reg.SetJobs(jobs)
 
-	return reg
+	return &client.RegistryClient{Registry: reg}
 }
 
 func TestSshUnknownMachine(t *testing.T) {
 	cAPI = newFakeRegistryForSsh()
 
-	_, ok := findAddressInMachineList("asdf")
+	_, ok, _ := findAddressInMachineList("asdf")
 	if ok {
 		t.Error("Expected to not find any machine with the machine ID `asdf`")
 	}
@@ -58,25 +93,25 @@ func TestSshUnknownMachine(t *testing.T) {
 func TestSshFindMachine(t *testing.T) {
 	cAPI = newFakeRegistryForSsh()
 
-	ip, _ := findAddressInMachineList("c31e44e1-f858-436e-933e-59c642517860")
+	ip, _, _ := findAddressInMachineList("c31e44e1-f858-436e-933e-59c642517860")
 	if ip != "1.2.3.4" {
 		t.Errorf("Expected to return the host 1.2.3.4, but it was %s", ip)
 	}
 }
 
-func TestSshFindMachineByUnknownJobName(t *testing.T) {
+func TestSshFindMachineByUnknownUnitName(t *testing.T) {
 	cAPI = newFakeRegistryForSsh()
 
-	_, ok := findAddressInRunningUnits("asdf")
+	_, ok, _ := findAddressInRunningUnits("asdf")
 	if ok {
-		t.Error("Expected to not find any machine with the job name `asdf`")
+		t.Error("Expected to not find any machine with the unit name `asdf`")
 	}
 }
 
-func TestSshFindMachineByJobName(t *testing.T) {
+func TestSshFindMachineByUnitName(t *testing.T) {
 	cAPI = newFakeRegistryForSsh()
 
-	ip, _ := findAddressInRunningUnits("j1")
+	ip, _, _ := findAddressInRunningUnits("j1")
 	if ip != "1.2.3.4" {
 		t.Errorf("Expected to return the host 1.2.3.4, but it was %s", ip)
 	}
@@ -85,13 +120,9 @@ func TestSshFindMachineByJobName(t *testing.T) {
 func TestGlobalLookupByUnknownArgument(t *testing.T) {
 	cAPI = newFakeRegistryForSsh()
 
-	ip, err := globalMachineLookup([]string{"asdf"})
-	if err != nil {
-		t.Fatal("Expected to not find any error")
-	}
-
-	if ip != "" {
-		t.Errorf("Expected to not find any host with the argument `asdf`")
+	_, err := globalMachineLookup([]string{"asdf"})
+	if err == nil {
+		t.Fatal("Expected to receive error, got nil")
 	}
 }
 
@@ -108,7 +139,7 @@ func TestGlobalLookupByMachineID(t *testing.T) {
 	}
 }
 
-func TestGlobalLookupByJobName(t *testing.T) {
+func TestGlobalLookupByUnitName(t *testing.T) {
 	cAPI = newFakeRegistryForSsh()
 
 	ip, err := globalMachineLookup([]string{"j1"})

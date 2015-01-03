@@ -1,26 +1,39 @@
+/*
+   Copyright 2014 CoreOS, Inc.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
 package config
 
 import (
-	"flag"
-	"strconv"
 	"strings"
-
-	"github.com/coreos/fleet/Godeps/_workspace/src/github.com/golang/glog"
 )
 
 type Config struct {
-	EtcdServers        []string
-	EtcdKeyPrefix      string
-	EtcdKeyFile        string
-	EtcdCertFile       string
-	EtcdCAFile         string
-	EtcdRequestTimeout float64
-	PublicIP           string
-	Verbosity          int
-	RawMetadata        string
-	AgentTTL           string
-	VerifyUnits        bool
-	AuthorizedKeysFile string
+	EtcdServers             []string
+	EtcdKeyPrefix           string
+	EtcdKeyFile             string
+	EtcdCertFile            string
+	EtcdCAFile              string
+	EtcdRequestTimeout      float64
+	EngineReconcileInterval float64
+	PublicIP                string
+	Verbosity               int
+	RawMetadata             string
+	AgentTTL                string
+	VerifyUnits             bool
+	AuthorizedKeysFile      string
 }
 
 func (c *Config) Metadata() map[string]string {
@@ -39,18 +52,4 @@ func (c *Config) Metadata() map[string]string {
 	}
 
 	return meta
-}
-
-// UpdateLoggingFlagsFromConfig extracts the logging-related options from
-// the provided config and sets flags in the given flagset
-func UpdateLoggingFlagsFromConfig(flagset *flag.FlagSet, conf *Config) {
-	err := flagset.Lookup("v").Value.Set(strconv.Itoa(conf.Verbosity))
-	if err != nil {
-		glog.Errorf("Failed to apply config.Verbosity to flag.v: %v", err)
-	}
-
-	err = flagset.Lookup("logtostderr").Value.Set("true")
-	if err != nil {
-		glog.Errorf("Failed to set flag.logtostderr to true: %v", err)
-	}
 }
